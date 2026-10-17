@@ -1,8 +1,11 @@
 from typing import Annotated
 
+import pandas as pd
 import yfinance as yf
 
 from tradingagents.dataflows.date_window import (
+    get_current_date,
+    is_historical,
     withhold_live_profile,
     withhold_undated_statements,
     withhold_undisclosed_trades,
@@ -169,3 +172,86 @@ def get_insider_transactions(
 def get_company_profile(ticker: str) -> dict:
     """Yahoo's current profile for ``ticker``: name, sector, industry and the like."""
     return yf_retry(lambda: yf.Ticker(normalize_symbol(ticker)).info) or {}
+
+
+def _earnings_day(value) -> str | None:
+    """Calendar day of an earnings timestamp, in the timezone it was labeled."""
+    ts = pd.Timestamp(value)
+    if pd.isna(ts):
+        return None
+    return f"{ts.year:04d}-{ts.month:02d}-{ts.day:02d}"
+
+
+def _row_get(row, *names):
+    """First non-empty column among ``names``, matching case-insensitively."""
+    lowered = {str(col).lower(): col for col in row.index}
+    for name in names:
+        key = lowered.get(name.lower())
+        if key is None:
+            continue
+        val = row[key]
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            continue
+        if isinstance(val, str) and val.strip() in ("", "-", "—"):
+            continue
+        return val
+    return None
+
+
+def get_earnings_context(
+    ticker: Annotated[str, "ticker symbol of the company"],
+    as_of_date: Annotated[str, "analysis date in YYYY-MM-DD format"] = None,
+) -> str:
+    """Next earnings date and recent EPS surprises, as known on ``as_of_date``.
+
+    Surprise rows are those whose earnings date is on or before the run date.
+    The next date is the earliest later date in the same series, and only when
+    that series already has a row on or before the run date — otherwise a
+    historical run would read today's still-upcoming print as if it were next.
+    """
+    canonical = normalize_symbol(ticker)
+    as_of_date = as_of_date or get_current_date()
+    frame = yf_retry(lambda: yf.Ticker(canonical).get_earnings_dates(limit=20))
+    if frame is None or getattr(frame, "empty", True):
+        raise_for_empty(ticker, canonical, "earnings dates")
+
+    rows: list[tuple[str, object]] = []
+    for idx, row in frame.iterrows():
+        day = _earnings_day(idx)
+        if day:
+            rows.append((day, row))
+    if not rows:
+        raise_for_empty(ticker, canonical, "earnings dates")
+
+    history = [(day, row) for day, row in rows if day <= as_of_date]
+    history.sort(key=lambda item: item[0], reverse=True)
+    history = history[:4]
+    upcoming = sorted(day for day, _row in rows if day > as_of_date)
+    next_date = upcoming[0] if upcoming and (history or not is_historical(as_of_date)) else None
+
+    lines = [
+        f"# Earnings context for {canonical}",
+        f"# Point-in-time as of: {as_of_date}",
+        "",
+        f"Next earnings date: {next_date}" if next_date
+        else f"Next earnings date: not available as of {as_of_date}",
+    ]
+    if history:
+        lines.append("")
+        lines.append("Recent earnings surprises (most recent first):")
+        for day, row in history:
+            reported = _row_get(row, "Reported EPS", "epsactual", "reported eps")
+            estimate = _row_get(row, "EPS Estimate", "epsestimate")
+            surprise = _row_get(row, "Surprise(%)", "epssurprisepct", "surprise(%)")
+            bits = []
+            if reported is not None:
+                bits.append(f"reported EPS {reported}")
+            if estimate is not None:
+                bits.append(f"estimate {estimate}")
+            if surprise is not None:
+                try:
+                    bits.append(f"surprise {float(surprise):+.1f}%")
+                except (TypeError, ValueError):
+                    bits.append(f"surprise {surprise}")
+            lines.append(f"{day}: {'; '.join(bits)}" if bits else day)
+    return "\n".join(lines) + "\n"

@@ -160,6 +160,7 @@ def _yahoo_calls():
     return [
         pytest.param(lambda: fundamentals.get_fundamentals("AAPL", today), id="fundamentals"),
         pytest.param(lambda: fundamentals.get_balance_sheet("AAPL", "quarterly", today), id="statement"),
+        pytest.param(lambda: fundamentals.get_earnings_context("AAPL", today), id="earnings"),
         pytest.param(lambda: fundamentals.get_insider_transactions("AAPL", today), id="insider"),
         pytest.param(lambda: fundamentals.get_company_profile("AAPL"), id="profile"),
         pytest.param(lambda: news.get_news_yfinance("AAPL", "2026-09-10", DAY), id="news"),

@@ -116,6 +116,7 @@ def test_an_indicator_that_could_not_be_read_is_not_shown_as_a_blank_value():
     ("get_balance_sheet", ("AAPL", "annual", get_current_date())),
     ("get_cashflow", ("AAPL", "annual", get_current_date())),
     ("get_income_statement", ("AAPL", "annual", get_current_date())),
+    ("get_earnings_context", ("AAPL", get_current_date())),
     ("get_insider_transactions", ("AAPL", get_current_date())),
 ])
 def test_a_yfinance_failure_is_a_vendor_error_not_a_report(func, args):

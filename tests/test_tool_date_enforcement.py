@@ -54,6 +54,7 @@ DATED_TOOLS = [
     tools.get_balance_sheet,
     tools.get_cashflow,
     tools.get_income_statement,
+    tools.get_earnings_context,
     tools.get_news,
     tools.get_global_news,
     tools.get_indicators,
@@ -71,7 +72,8 @@ def test_trade_date_is_hidden_from_the_model(tool):
 INSTRUMENT_TOOLS = [
     tools.get_stock_data, tools.get_indicators, tools.get_verified_market_snapshot,
     tools.get_fundamentals, tools.get_balance_sheet, tools.get_cashflow,
-    tools.get_income_statement, tools.get_news, tools.get_insider_transactions,
+    tools.get_income_statement, tools.get_earnings_context, tools.get_news,
+    tools.get_insider_transactions,
 ]
 
 
