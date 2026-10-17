@@ -169,6 +169,23 @@ def get_income_statement(
 
 
 @tool
+def get_earnings_context(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """
+    Retrieve the next earnings date and recent EPS surprise history.
+    Uses the configured fundamental_data vendor (yfinance).
+    Args:
+        curr_date (str): Current date you are trading at, yyyy-mm-dd
+    Returns:
+        str: Next earnings date and recent surprise history as of curr_date
+    """
+    return route_to_vendor("get_earnings_context", ticker, as_of(curr_date, trade_date))
+
+
+@tool
 def get_news(
     ticker: Annotated[str, InjectedState("company_of_interest")],
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],

@@ -29,6 +29,7 @@ from tradingagents.dataflows.vendors.sec_edgar import (
 from tradingagents.dataflows.vendors.yahoo.fundamentals import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
+    get_earnings_context as get_yfinance_earnings_context,
     get_fundamentals as get_yfinance_fundamentals,
     get_income_statement as get_yfinance_income_statement,
     get_insider_transactions as get_yfinance_insider_transactions,
@@ -61,7 +62,8 @@ TOOLS_CATEGORIES = {
             "get_fundamentals",
             "get_balance_sheet",
             "get_cashflow",
-            "get_income_statement"
+            "get_income_statement",
+            "get_earnings_context",
         ]
     },
     "news_data": {
@@ -124,6 +126,9 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_income_statement,
         "sec_edgar": get_sec_edgar_income_statement,
         "yfinance": get_yfinance_income_statement,
+    },
+    "get_earnings_context": {
+        "yfinance": get_yfinance_earnings_context,
     },
     # news_data
     "get_news": {
