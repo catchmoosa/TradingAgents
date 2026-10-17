@@ -560,3 +560,50 @@ def test_share_class_total_keeps_a_single_class():
     assert sec_edgar._share_class_total(
         [4_425_000_000, 1_087_000_000, 3_338_000_000]
     ) == 4_425_000_000
+
+
+AMZN_MAP = {"0": {"cik_str": 1018724, "ticker": "AMZN", "title": "Amazon.com, Inc."}}
+
+
+@pytest.mark.unit
+def test_cover_page_share_date_is_not_a_balance_sheet_period(monkeypatch):
+    """dei cover-page shares (2026-07-22) must not become the newest column.
+
+    Live regression: AMZN's whole balance-sheet column went blank because the
+    cover date ranked as the latest period and cash/debt had no fact there.
+    """
+    facts = {"facts": {
+        "us-gaap": {
+            "Assets": {"units": {"USD": [
+                _fact("2026-06-30", 600_000_000_000, "2026-07-31", form="10-Q", fp="Q2", fy=2026),
+                _fact("2026-03-31", 580_000_000_000, "2026-04-30", form="10-Q", fp="Q1", fy=2026),
+            ]}},
+            "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [
+                _fact("2026-06-30", 66_000_000_000, "2026-07-31", form="10-Q", fp="Q2", fy=2026),
+                _fact("2026-03-31", 60_000_000_000, "2026-04-30", form="10-Q", fp="Q1", fy=2026),
+            ]}},
+            "LongTermDebtNoncurrent": {"units": {"USD": [
+                _fact("2026-06-30", 50_000_000_000, "2026-07-31", form="10-Q", fp="Q2", fy=2026),
+                _fact("2026-03-31", 48_000_000_000, "2026-04-30", form="10-Q", fp="Q1", fy=2026),
+            ]}},
+        },
+        "dei": {
+            "EntityCommonStockSharesOutstanding": {"units": {"shares": [
+                _fact("2026-07-22", 10_500_000_000, "2026-07-31", form="10-Q", fp="Q2", fy=2026),
+            ]}},
+        },
+    }}
+    _patch_filer(monkeypatch, AMZN_MAP, facts)
+    out = sec_edgar.get_balance_sheet("AMZN", "quarterly", "2026-10-17")
+    cols = _columns(out)
+    assert cols[0].startswith("Q2 FY2026 ended 2026-06-30")
+    assert "2026-07-22" not in out
+    rows = _rows(out)
+    assert rows["Cash and Equivalents"][0] == "66000"
+    assert rows["Long-Term Debt"][0] == "50000"
+    share_row = next(cells for name, cells in rows.items() if name.startswith("Shares Outstanding"))
+    assert share_row[0] == "10500"
+    table = sec_edgar.statement_table("balance_sheet", "AMZN", "quarterly", "2026-10-17")
+    assert table.columns[0].end == "2026-06-30"
+    assert table.rows["Cash and Equivalents"][0] == pytest.approx(66_000_000_000)
+    assert table.rows["Shares Outstanding"][0] == pytest.approx(10_500_000_000)

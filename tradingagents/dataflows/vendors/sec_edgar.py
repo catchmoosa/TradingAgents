@@ -89,6 +89,7 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
                                "NoncontrollingInterestInConsolidatedEntity")),
         # Multi-class filers (NVO A+B, GOOGL A+C, META, BRK) report one fact
         # per class under the same period; `_as_of_shares` sums them.
+        # Cover-page dei dates are aligned onto statement periods, not columns.
         ("Shares Outstanding", ("CommonStockSharesOutstanding",
                                 "EntityCommonStockSharesOutstanding")),
         ("Shares Issued", ("CommonStockSharesIssued",)),
@@ -171,6 +172,9 @@ _YEAR_TO_DATE = ((150, 200, 6), (240, 290, 9))
 # check, so either would read as a fiscal year. The value is still the latest
 # filing of any form: a recast after a split or spin-off counts from its filing.
 _ANNUAL_FORMS = ("10-K", "20-F", "40-F")
+# Cover-page share facts (dei EntityCommonStockSharesOutstanding) often end on
+# a date after the balance-sheet instant. They must not enter period selection.
+_SHARE_PERIOD_LABELS = frozenset({"Shares Outstanding", "Shares Issued"})
 
 # A 10-Q table back to 2018 is ~28 columns, oldest first, and the model then
 # misreads which period is which. Keep a short, latest-first window.
@@ -351,6 +355,10 @@ def _as_of_shares(namespaces: dict, tags: tuple[str, ...], as_of_date: str,
     once per class. Ordinary `_as_of` would keep one class. Facts are taken
     from both ``dei`` and ``us-gaap``; the latest filing on or before the
     date wins, then classes in that vintage are summed.
+
+    Cover-page dei facts can end after the balance-sheet date. ``_collect``
+    keeps those dates out of the statement columns and parks the count on
+    the latest statement period they follow.
     """
     groups: dict[tuple[str, int, str], dict] = {}
     for ns in ("dei", "us-gaap"):
@@ -403,6 +411,41 @@ def _as_of_shares(namespaces: dict, tags: tuple[str, ...], as_of_date: str,
         meta[period] = {"fy": slot["fy"], "fp": slot["fp"], "form": slot["form"]}
     chosen_unit = units[max(units)] if units else "shares"
     return dict(sorted(values.items())), chosen_unit, meta
+
+
+def _align_cover_share_facts(
+    values: dict[tuple[str, int], float],
+    meta: dict[tuple[str, int], dict],
+    periods: list[tuple[str, int]],
+) -> tuple[dict[tuple[str, int], float], dict[tuple[str, int], dict]]:
+    """Map cover-page share dates onto statement period-ends.
+
+    A 10-Q cover page often reports shares as of ~the filing week (AMZN
+    2026-07-22) while the balance sheet is the quarter-end (2026-06-30).
+    Exact period-end facts stay put; a later cover date fills the latest
+    statement period on or before it when that cell is empty, or when the
+    cover total is substantially larger (omitted share class).
+    """
+    period_set = set(periods)
+    aligned: dict[tuple[str, int], float] = {}
+    aligned_meta: dict[tuple[str, int], dict] = {}
+    leftover: list[tuple[tuple[str, int], float]] = []
+    for key, val in values.items():
+        if key in period_set:
+            aligned[key] = val
+            if key in meta:
+                aligned_meta[key] = meta[key]
+        else:
+            leftover.append((key, val))
+    for (end, index), val in leftover:
+        candidates = [p for p in periods if p[1] == index and p[0] <= end]
+        if not candidates:
+            continue
+        target = max(candidates)
+        existing = aligned.get(target)
+        if existing is None or val > existing * 1.15:
+            aligned[target] = val
+    return aligned, aligned_meta
 
 
 def _fiscal_year(value) -> int | None:
@@ -618,9 +661,12 @@ def _collect(kind: str, ticker: str, freq: str, as_of_date: str, title: str):
         metas[label] = meta
     # Each row takes the shortest span it reports for a period, and a column
     # holds one span of one period, so a row filed only to date keeps its figure
-    # beside a row filed by quarter.
+    # beside a row filed by quarter. Share rows are cover-page capable and
+    # must not introduce their own period-ends (AMZN 2026-07-22 vs 2026-06-30).
     chosen = {label: {} for label in lines}
     for label, (values, _) in lines.items():
+        if label in _SHARE_PERIOD_LABELS:
+            continue
         for end, index in values:
             chosen[label][end] = min(index, chosen[label].get(end, index))
     periods = sorted({(end, index) for spans_of in chosen.values() for end, index in spans_of.items()})
@@ -638,6 +684,15 @@ def _collect(kind: str, ticker: str, freq: str, as_of_date: str, title: str):
         raise NoMarketDataError(ticker, ticker, f"no {freq} {title.lower()} filed by {as_of_date}")
 
     periods = _limit_periods(periods, quarterly)
+    for label in _SHARE_PERIOD_LABELS:
+        if label not in lines:
+            continue
+        values, unit = lines[label]
+        aligned, aligned_meta = _align_cover_share_facts(values, metas[label], periods)
+        lines[label] = (aligned, unit)
+        metas[label] = aligned_meta
+        for end, index in aligned:
+            chosen[label][end] = min(index, chosen[label].get(end, index))
     return as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods
 
 

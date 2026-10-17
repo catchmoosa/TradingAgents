@@ -2013,11 +2013,16 @@ def _maybe_pct(value) -> float | None:
 
 
 def _maybe_expense(value) -> float | None:
-    """Expense ratio: yfinance uses 0.0059 (fraction) or 0.59 (already percent)."""
+    """Expense ratio: yfinance mixes fractions and already-percent values.
+
+    ``annualReportExpenseRatio`` is a fraction (0.0015 → 0.15%).
+    ``netExpenseRatio`` is already percent (TLT 0.15, TCHI 0.59). Values
+    below 0.05 are treated as fractions; 0.15 must stay 0.15%, not 15%.
+    """
     number = _maybe_float(value)
     if number is None:
         return None
-    return number * 100 if abs(number) <= 0.2 else number
+    return number * 100 if abs(number) < 0.05 else number
 
 
 def packet_summary_markdown(markdown: str) -> str:

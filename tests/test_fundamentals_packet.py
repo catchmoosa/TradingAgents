@@ -443,6 +443,8 @@ def test_etf_holding_percent_fraction_is_scaled():
     assert _maybe_pct(0.048) == pytest.approx(4.8)
     assert _maybe_expense(0.0059) == pytest.approx(0.59)
     assert _maybe_expense(0.59) == pytest.approx(0.59)
+    assert _maybe_expense(0.15) == pytest.approx(0.15)  # TLT netExpenseRatio, already %
+    assert _maybe_expense(0.0015) == pytest.approx(0.15)  # annualReportExpenseRatio fraction
     packet = build_packet(PacketInputs(
         ticker="TCHI", as_of="2026-10-17", quote_type="ETF",
         price=PricePoint(close=20.0, day="2026-10-17"),
@@ -485,3 +487,7 @@ def test_equity_etf_bond_holdings_dataframe_does_not_break_fetch(monkeypatch):
     assert snap.expense_ratio == pytest.approx(0.59)
     assert snap.yield_ttm == pytest.approx(2.31)
     assert snap.duration is None
+    tlt = _fetch_fund("TLT", {
+        "quoteType": "ETF", "netExpenseRatio": 0.15, "yield": 0.042,
+    })
+    assert tlt.expense_ratio == pytest.approx(0.15)
