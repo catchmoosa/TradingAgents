@@ -103,6 +103,43 @@ def test_extract_does_not_take_contingent_vw_billion():
     assert facts.cash_inflow is False
 
 
+RIVN_PRICING_8K = """
+in connection with the offering, issuance and sale by the Company of 75,000,000 shares of the
+Company's Class A common stock, par value $0.001 per share (the "Class A common stock"), at an offering
+price of $15.50 per share. In addition, under the terms of the Underwriting Agreement, the Company granted
+the Underwriters the option, for 30 days, to purchase up to 11,250,000 additional shares of Class A common
+stock at the public offering price, which the Underwriters exercised in full on July 8, 2026. The
+net proceeds from the offering will be approximately $1.32 billion, after deducting underwriting discounts
+and commissions and estimated offering expenses payable by the Company.
+"""
+
+RIVN_TERM_LOAN_8K = """
+Item 2.03 Creation of a Direct Financial Obligation.
+On October 7, 2026 the Company announced the funding of the committed $1.0 billion, 10-year term loan
+facility from Volkswagen Group. The facility is secured by the 50% equity interest in the Joint Venture.
+The principal under each Loan will be repaid each year, payable in installments of $50.0 million.
+On the Funding Date, the term loans under the Loan Agreements were funded in the full committed amount of
+$1.0 billion.
+"""
+
+
+@pytest.mark.unit
+def test_extract_ignores_par_value_and_reads_offering_price():
+    facts = extract_money_facts(RIVN_PRICING_8K, ["8.01"])
+    assert facts.amount == pytest.approx(1.32e9)
+    assert facts.cash_inflow is True
+    assert facts.shares == pytest.approx(75_000_000)
+    assert facts.price_per_share == pytest.approx(15.50)
+
+
+@pytest.mark.unit
+def test_extract_debt_uses_facility_not_amortization_installment():
+    facts = extract_money_facts(RIVN_TERM_LOAN_8K, ["2.03"])
+    assert facts.amount == pytest.approx(1e9)
+    assert facts.kind == "debt"
+    assert facts.cash_inflow is False
+
+
 @pytest.mark.unit
 def test_extract_debt_principal_is_not_a_cash_inflow():
     facts = extract_money_facts(DEBT_HTML, ["2.03"])

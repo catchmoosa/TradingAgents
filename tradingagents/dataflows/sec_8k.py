@@ -52,6 +52,15 @@ _SHARES_PRICE = re.compile(
     r"([\d,.]+)\s*(million|billion)?\s+shares.{0,140}?(?:US)?\$\s*([\d.]+)\s*per share",
     re.I,
 )
+_OFFER_PRICE = re.compile(
+    r"(?:offering price|public offering price|price to (?:the )?public)\s+"
+    r"(?:of\s+)?(?:US)?\$\s*([\d.]+)\s*per share",
+    re.I,
+)
+_SHARE_COUNT = re.compile(
+    r"([\d,.]+)\s*(million|billion)?\s+shares\b",
+    re.I,
+)
 _PRINCIPAL = re.compile(
     rf"(?:aggregate\s+)?principal(?:\s+amount)?.{{0,80}}?{_DOLLAR}",
     re.I,
@@ -60,6 +69,12 @@ _ISSUED_NOTES = re.compile(
     rf"issued.{{0,60}}?{_DOLLAR}.{{0,60}}?(?:notes|bonds|debentures)",
     re.I,
 )
+_FACILITY = re.compile(
+    rf"(?:committed|funded).{{0,40}}?{_DOLLAR}.{{0,40}}?(?:term loan|credit facility|notes)"
+    rf"|{_DOLLAR}.{{0,40}}?(?:term loan|credit facility)",
+    re.I,
+)
+_SKIP_AMOUNT_CTX = re.compile(r"\binstallments?\b|\brepaid each\b|\bpar value\b", re.I)
 _EQUITY_CTX = re.compile(
     r"\b(common stock|ordinary shares|equity|underwritten|public offering|"
     r"follow[- ]on|at[- ]the[- ]market|registered direct)\b",
@@ -100,7 +115,7 @@ class SubsequentEvent:
         item_str = "/".join(self.items) if self.items else "?"
         head = self._headline()
         extra = ""
-        if self.shares and self.price_per_share:
+        if self.shares and self.price_per_share and self.price_per_share >= 0.05:
             share_n = self.shares / 1e6 if self.shares >= 1e4 else self.shares
             extra = f"; {share_n:,.1f}M shares at ${self.price_per_share:.2f}"
         link = f"[{self.accession}]({self.url})" if self.url else self.accession
@@ -183,7 +198,11 @@ def extract_money_facts(text: str, items: list[str] | None = None) -> MoneyFacts
         return MoneyFacts()
 
     proceeds = _first_scaled(_NET_BEFORE, blob) or _first_scaled(_NET_AFTER, blob)
-    principal = _first_scaled(_PRINCIPAL, blob) or _first_scaled(_ISSUED_NOTES, blob)
+    principal = (
+        _first_scaled(_FACILITY, blob, skip=_skip_amount_ctx)
+        or _first_scaled(_PRINCIPAL, blob, skip=_skip_amount_ctx)
+        or _first_scaled(_ISSUED_NOTES, blob, skip=_skip_amount_ctx)
+    )
     shares, price = _shares_and_price(blob)
 
     equity_ctx = bool(_EQUITY_CTX.search(blob))
@@ -380,13 +399,37 @@ def _complete_url(cik: str, accession: str) -> str:
     return f"{base}/{accession}.txt"
 
 
-def _first_scaled(pattern: re.Pattern, text: str) -> float | None:
+def _skip_amount_ctx(text: str, match: re.Match) -> bool:
+    window = text[max(0, match.start() - 50):match.end() + 50]
+    return bool(_SKIP_AMOUNT_CTX.search(window))
+
+
+def _first_scaled(
+    pattern: re.Pattern,
+    text: str,
+    *,
+    skip=None,
+) -> float | None:
     for match in pattern.finditer(text):
         if _HEDGE_RE.search(text[max(0, match.start() - 100):match.start()]):
             continue
-        groups = match.groups()
-        number = _to_float(groups[0])
-        unit = groups[1] if len(groups) > 1 else None
+        if skip and skip(text, match):
+            continue
+        # Alternation can leave the first (number, unit) pair empty.
+        number = None
+        unit = None
+        captured = match.groups()
+        i = 0
+        while i < len(captured):
+            if captured[i] is None:
+                i += 1
+                continue
+            parsed = _to_float(captured[i])
+            if parsed is not None:
+                number = parsed
+                unit = captured[i + 1] if i + 1 < len(captured) else None
+                break
+            i += 1
         if number is None:
             continue
         scaled = _scale_amount(number, unit)
@@ -398,23 +441,49 @@ def _first_scaled(pattern: re.Pattern, text: str) -> float | None:
 def _shares_and_price(text: str) -> tuple[float | None, float | None]:
     if not _EQUITY_CTX.search(text):
         return None, None
-    match = _SHARES_PRICE.search(text)
-    if not match:
-        return None, None
-    if _HEDGE_RE.search(text[max(0, match.start() - 100):match.start()]):
-        return None, None
-    count = _to_float(match.group(1))
-    unit = match.group(2)
-    price = _to_float(match.group(3))
-    if count is None or price is None:
-        return None, None
-    if unit and unit.lower().startswith("billion"):
+    price = None
+    offer = _OFFER_PRICE.search(text)
+    if offer:
+        price = _to_float(offer.group(1))
+        if price is not None and price < 0.05:
+            price = None
+    shares = None
+    for match in _SHARE_COUNT.finditer(text):
+        if _HEDGE_RE.search(text[max(0, match.start() - 100):match.start()]):
+            continue
+        count = _parse_share_count(match.group(1), match.group(2))
+        if count is None:
+            continue
+        shares = count
+        break
+    if shares is not None and price is not None:
+        return shares, price
+    for match in _SHARES_PRICE.finditer(text):
+        ctx = text[match.start():match.end()]
+        if re.search(r"par value", ctx, re.I):
+            continue
+        if _HEDGE_RE.search(text[max(0, match.start() - 100):match.start()]):
+            continue
+        count = _parse_share_count(match.group(1), match.group(2))
+        pps = _to_float(match.group(3))
+        if count is None or pps is None or pps < 0.05:
+            continue
+        return count, pps
+    return shares, price
+
+
+def _parse_share_count(raw: str, unit: str | None) -> float | None:
+    count = _to_float(raw)
+    if count is None:
+        return None
+    token = (unit or "").lower()
+    if token.startswith("billion"):
         count *= 1e9
-    elif unit and unit.lower().startswith("million"):
+    elif token.startswith("million"):
         count *= 1e6
-    if count < 1e4 and unit is None:
-        return None, None
-    return count, price
+    if count < 1e4 and not unit:
+        return None
+    return count
 
 
 def _to_float(raw: str | None) -> float | None:
