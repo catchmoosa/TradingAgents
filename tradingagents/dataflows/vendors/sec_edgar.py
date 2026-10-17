@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -32,6 +33,11 @@ from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableE
 from tradingagents.dataflows.files import replace_file
 
 logger = logging.getLogger(__name__)
+
+# SEC fair-access: keep a little headroom under 10 requests/second.
+_MIN_REQUEST_INTERVAL = 0.12
+_rate_lock = threading.Lock()
+_last_request_at = 0.0
 
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
@@ -190,11 +196,19 @@ def _user_agent() -> str:
     return configured or f"TradingAgents/{__version__} (contact@example.com)"
 
 
+def _throttle() -> None:
+    global _last_request_at
+    with _rate_lock:
+        wait = _MIN_REQUEST_INTERVAL - (time.time() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.time()
 
 
 def _fetch_json(url: str) -> dict:
     """Read a public EDGAR document, respecting SEC's identification rule."""
     try:
+        _throttle()
         response = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=30)
         response.raise_for_status()
         return response.json()
@@ -207,6 +221,19 @@ def _fetch_json(url: str) -> dict:
         raise VendorUnavailableError("SEC EDGAR returned an unreadable response") from exc
 
 
+def _fetch_text(url: str) -> str:
+    """Read a public EDGAR document as text (8-K body / complete submission)."""
+    try:
+        _throttle()
+        response = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=30)
+        response.raise_for_status()
+        response.encoding = response.encoding or "utf-8"
+        return response.text
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise VendorUnavailableError(f"SEC EDGAR request failed ({status or type(exc).__name__})") from exc
+
+
 def _cached_json(url: str, name: str) -> dict:
     path = Path(get_config()["data_cache_dir"]) / "sec_edgar" / name
     if path.exists() and time.time() - path.stat().st_mtime < _CACHE_TTL_SECONDS:
@@ -217,6 +244,16 @@ def _cached_json(url: str, name: str) -> dict:
     data = _fetch_json(url)
     path.parent.mkdir(parents=True, exist_ok=True)
     replace_file(path, lambda temp: Path(temp).write_text(json.dumps(data), encoding="utf-8"))
+    return data
+
+
+def _cached_text(url: str, name: str) -> str:
+    path = Path(get_config()["data_cache_dir"]) / "sec_edgar" / name
+    if path.exists() and time.time() - path.stat().st_mtime < _CACHE_TTL_SECONDS:
+        return path.read_text(encoding="utf-8", errors="replace")
+    data = _fetch_text(url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    replace_file(path, lambda temp: Path(temp).write_text(data, encoding="utf-8"))
     return data
 
 

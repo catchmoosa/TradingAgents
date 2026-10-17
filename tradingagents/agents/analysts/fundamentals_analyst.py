@@ -75,7 +75,8 @@ def create_fundamentals_analyst(llm):
             "labels exactly as the packet writes them. Read the Data-quality flags section; when "
             "a CONFLICT is listed, use the packet's chosen value. Yahoo \"reported\" EPS is street/"
             "adjusted, labelled beside GAAP/IFRS EPS. Runway leads with TTM FCF; subsequent raises "
-            "and credit lines are separate lines, not mixed into period figures. "
+            "and credit lines are separate lines, not mixed into period figures. When a pro forma "
+            "runway is shown it is derived (D) from as-reported cash plus subsequent equity inflows. "
             "Append a Markdown table at the end with a `Packet field` column so claims are traceable."
             + get_language_instruction()
         )

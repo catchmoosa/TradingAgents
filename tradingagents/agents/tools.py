@@ -192,9 +192,10 @@ def get_fundamentals_packet(
     trade_date: Annotated[str, InjectedState("trade_date")] = "",
 ) -> str:
     """Fully labelled fundamentals packet: statements, TTM, margins, FCF, runway,
-    valuation at the point-in-time last close, capital returns, and a statements
-    appendix. Every figure already has its period, unit and basis; do not
-    recompute. Uses the last close as the current price, not a moving average.
+    subsequent 8-K events, valuation at the point-in-time last close, capital
+    returns, and a statements appendix. Every figure already has its period, unit
+    and basis; do not recompute. Uses the last close as the current price, not a
+    moving average.
     """
     import tradingagents.dataflows.fundamentals_packet as packet_mod
 

@@ -16,6 +16,7 @@ from tradingagents.dataflows.fundamentals_packet import (
     load_tool_dump,
     merge_extra_rows,
 )
+from tradingagents.dataflows.sec_8k import SubsequentEvent
 from tradingagents.dataflows.vendors import sec_edgar
 
 FIXTURES = Path(__file__).parent / "fixtures" / "fundamentals"
@@ -215,3 +216,83 @@ def test_analyst_forces_the_packet_when_the_model_skips_it(monkeypatch):
     assert "packet RIVN 2026-10-16" in out["fundamentals_packet_summary"]
     assert "## 2." not in out["fundamentals_packet_summary"]
     assert out["fundamentals_report"]
+
+
+@pytest.mark.unit
+def test_rivn_pro_forma_runway_includes_july_equity_raise():
+    inputs = _load("RIVN")
+    inputs.as_of = "2026-10-17"
+    inputs.subsequent_events = [
+        SubsequentEvent(
+            filed="2026-07-22",
+            items=["3.02", "8.01"],
+            title="Follow-on offering",
+            accession="0001874178-26-000045",
+            url="https://www.sec.gov/Archives/edgar/data/1874178/000187417826000045/offer.htm",
+            kind="equity_raise",
+            amount=1_317_000_000,
+            cash_inflow=True,
+        ),
+    ]
+    packet = build_packet(inputs)
+    assert packet.metrics["runway_ttm_quarters"] == pytest.approx(6.1, abs=0.05)
+    assert packet.metrics["runway_pro_forma_quarters"] == pytest.approx(7.6, abs=0.05)
+    assert packet.metrics["subsequent_cash_in"] == pytest.approx(1_317_000_000)
+    section = packet.markdown.split("## 8.", 1)[1].split("## 9.", 1)[0]
+    assert "2026-06-30" in section
+    assert "1,317" in section
+    assert "3.02" in section and "8.01" in section
+    key = packet.markdown.split("## 2.", 1)[0]
+    assert "pro forma" in key.lower()
+    assert "7.6" in key
+    assert "6.1" in key
+
+
+@pytest.mark.unit
+def test_debt_event_is_not_added_to_pro_forma_cash():
+    inputs = _load("RIVN")
+    inputs.subsequent_events = [
+        SubsequentEvent(
+            filed="2026-07-01",
+            items=["2.03"],
+            title="Senior notes",
+            accession="0001874178-26-000040",
+            url="https://www.sec.gov/example.htm",
+            kind="debt",
+            amount=750_000_000,
+            cash_inflow=False,
+        ),
+    ]
+    packet = build_packet(inputs)
+    assert packet.metrics.get("runway_pro_forma_quarters") is None
+    key = packet.markdown.split("## 2.", 1)[0]
+    assert "pro forma" not in key.lower()
+    assert "not added to cash" in packet.markdown
+
+
+@pytest.mark.unit
+def test_packet_omits_8k_section_when_fetch_flagged():
+    inputs = _load("RIVN")
+    inputs.extra_flags.append(
+        "SUBSEQUENT EVENTS: 8-K fetch failed (VendorUnavailableError); section omitted"
+    )
+    packet = build_packet(inputs)
+    section = packet.markdown.split("## 8.", 1)[1].split("## 9.", 1)[0]
+    assert "Omitted" in section
+    assert "SUBSEQUENT EVENTS" in packet.markdown
+
+
+@pytest.mark.unit
+def test_sony_annual_capex_is_positive_spend_in_core():
+    packet = build_packet(_load("SONY"))
+    annual = packet.markdown.split("## 3. Annual", 1)[1].split("## 4.", 1)[0]
+    capex_line = next(line for line in annual.splitlines() if "Capex" in line)
+    assert "Capex (spend)" in capex_line
+    assert "-457.7" not in capex_line
+    assert "457.7" in capex_line
+    appendix = packet.markdown.split("10.5 Cash flow, annual", 1)[1].split("###", 1)[0]
+    assert "source sign" in packet.markdown.split("## 10.", 1)[1].lower()
+    app_line = next(
+        line for line in appendix.splitlines() if "Capital Expenditure" in line
+    )
+    assert "-457.7" in app_line

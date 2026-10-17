@@ -16,6 +16,7 @@ from datetime import date
 from typing import Any
 
 from tradingagents.dataflows.errors import NoMarketDataError, VendorUnavailableError
+from tradingagents.dataflows.sec_8k import SubsequentEvent, load_subsequent_events
 from tradingagents.dataflows.statement_tables import (
     PeriodCol,
     StatementTable,
@@ -189,6 +190,7 @@ class PacketInputs:
     surprises: list[EarningsRow] = field(default_factory=list)
     insiders: InsiderSummary | None = None
     fund: FundSnapshot | None = None
+    subsequent_events: list[SubsequentEvent] = field(default_factory=list)
     extra_flags: list[str] = field(default_factory=list)
 
 
@@ -644,10 +646,16 @@ def _build_equity(inputs: PacketInputs) -> Packet:
 
     runway_ttm = None
     runway_mrq = None
+    runway_pf = None
+    cash_in = sum(
+        (e.amount or 0.0) for e in inputs.subsequent_events if e.cash_inflow and e.amount
+    )
     if cash0 and ttm_fcf is not None and ttm_fcf < 0:
         burn_q = abs(ttm_fcf) / 4
         if burn_q:
             runway_ttm = cash0 / burn_q
+            if cash_in:
+                runway_pf = (cash0 + cash_in) / burn_q
     if cash0 and fcf and fcf[0] is not None and fcf[0] < 0:
         runway_mrq = cash0 / abs(fcf[0])
 
@@ -677,6 +685,8 @@ def _build_equity(inputs: PacketInputs) -> Packet:
         "inventory": inv0,
         "sbc_h1": sbc_h1,
         "runway_ttm_quarters": runway_ttm,
+        "runway_pro_forma_quarters": runway_pf,
+        "subsequent_cash_in": cash_in or None,
     }
 
     markdown, summary, numbers = _render_equity(
@@ -802,7 +812,8 @@ def _quality_flags(inputs, isq, cfq, bsq, ttm_fcf, ttm_ni, ttm_nic, pretax, ocf)
                 break
     flags.append(
         "DERIVED (D): standalone quarters from YTD differences and Q4 = FY − 9M; "
-        "TTM sums, FCF, margins, runway, continuing EPS."
+        "TTM sums, FCF, margins, runway, continuing EPS; pro forma runway from "
+        "subsequent equity inflows."
     )
     if inputs.yahoo_info:
         flags.append(
@@ -903,6 +914,19 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
     else:
         runway_line = "n/a | | "
 
+    cash_in = metrics.get("subsequent_cash_in")
+    runway_pf = metrics.get("runway_pro_forma_quarters")
+    if cash_in and ttm_fcf is not None and ttm_fcf < 0 and runway_pf is not None:
+        pf_line = (
+            f"| **Runway, TTM FCF burn (pro forma incl. subsequent raises)** D | "
+            f"**{runway_pf:.1f} quarters (≈{runway_pf / 4:.1f} yrs)** | from "
+            f"{(bsq.columns[0].end if bsq else as_of)} | "
+            f"({fmt_plain(cash0, currency)} + {fmt_plain(cash_in, currency)}) ÷ "
+            f"({fmt_plain(abs(ttm_fcf), currency)} / 4) |\n"
+        )
+    else:
+        pf_line = ""
+
     # Header + key metrics (summary for debate agents is this block).
     header = f"""## 0. Header
 | Field | Value |
@@ -950,7 +974,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
 | SBC H1 | {fmt_amount(sbc_h1, currency)} | first half of latest FY | 6-month YTD or Q1+Q2 |
 | Diluted average shares (latest) | {_cell(shares_dil, 0, currency, kind="shares")} | latest quarter | |
 | **Runway, TTM FCF burn** | {runway_line} |
-| Runway, latest-quarter burn | {f"{runway_mrq:.1f} quarters" if runway_mrq else "n/a"} | | cash+STI ÷ |MRQ FCF| |
+{pf_line}| Runway, latest-quarter burn | {f"{runway_mrq:.1f} quarters" if runway_mrq else "n/a"} | | cash+STI ÷ |MRQ FCF| |
 | Diluted EPS TTM (GAAP/IFRS) | {f"{ttm_eps:,.2f}" if ttm_eps is not None else "–"} | {ttm_label} | street/adjusted EPS is labelled separately |
 """
     summary = header + "\n" + key
@@ -1008,6 +1032,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
         vals = lookup_row(table, key) or []
         return [_cell(vals, i, currency, kind=kind) for i in range(len(ah))]
     a_fcf = None
+    a_cap: list[float | None] = []
     if cfa is not None:
         a_ocf = lookup_row(cfa, "Operating Cash Flow") or []
         a_cap = _as_spend(lookup_row(cfa, "Capex") or [])
@@ -1021,7 +1046,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
         ("**Net income attrib., total**", a_cells(isa, "Net Income")),
         ("Diluted EPS total", a_cells(isa, "Diluted EPS", kind="eps")),
         ("Operating cash flow", a_cells(cfa, "Operating Cash Flow")),
-        ("Capex", a_cells(cfa, "Capex")),
+        ("Capex (spend)", [_cell(a_cap, i, currency) for i in range(len(ah))]),
         ("FCF total", [_cell(a_fcf or [], i, currency, derived=True) for i in range(len(ah))]),
         ("Buybacks", [_cell(_as_outflow_positive(lookup_row(cfa, "Buybacks") or []), i, currency) for i in range(len(ah))]),
         ("Dividends paid", [_cell(_as_outflow_positive(lookup_row(cfa, "Dividends Paid") or []), i, currency) for i in range(len(ah))]),
@@ -1038,6 +1063,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
     flags_md = "## 9. Data-quality flags\n" + "\n".join(f"- {f}" for f in flags)
     appendix = _appendix(inputs, isq, cfq, bsq, isa, cfa, bsa, currency, month, naming,
                          fcf, ebitda, borrow, cash_sti)
+    subsequent = _subsequent_section(inputs)
 
     core = f"""# Fundamentals packet: {ticker}{f" ({inputs.name})" if inputs.name else ""}
 
@@ -1060,8 +1086,7 @@ QoQ revenue: {_pct(yoy_pair(rev[0], rev[1]) if rev and len(rev) > 1 else None)} 
 
 {insider}
 
-## 8. Subsequent events
-Not in this version (phase 2). Subsequent raises and credit lines are listed separately when present in the statements (equity issuance / financing cash flow); they are not mixed into period FCF. Runway leads with TTM FCF.
+{subsequent}
 
 {flags_md}
 """
@@ -1185,9 +1210,52 @@ def _insider_section(inputs: PacketInputs) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _subsequent_section(inputs: PacketInputs) -> str:
+    period_end = latest_period_end(inputs)
+    since = period_end or "latest period"
+    failed = any(f.startswith("SUBSEQUENT EVENTS:") for f in inputs.extra_flags)
+    events = inputs.subsequent_events or []
+    lines = [f"## 8. Subsequent events (since {since})"]
+    if failed and not events:
+        lines.append(
+            "Omitted: 8-K filings could not be retrieved. See data-quality flags."
+        )
+        return "\n".join(lines)
+    if not events:
+        lines.append(
+            "None in the window (filings after period end, on or before the as-of date)."
+        )
+        lines.append(
+            "Subsequent raises are not mixed into period FCF. Runway as-reported uses "
+            "cash+STI at period end."
+        )
+        return "\n".join(lines)
+    for event in events:
+        lines.append(f"- {event.display_line()}")
+    lines.append(
+        "Subsequent cash inflows are not mixed into period FCF. Pro forma runway "
+        "adds only confident equity/net proceeds and is labelled D."
+    )
+    return "\n".join(lines)
+
+
+def latest_period_end(inputs: PacketInputs) -> str | None:
+    ends: list[str] = []
+    for table in inputs.statements.values():
+        for col in table.columns:
+            if col.end and re.match(r"\d{4}-\d{2}-\d{2}", col.end):
+                ends.append(col.end[:10])
+    return max(ends) if ends else None
+
+
 def _appendix(inputs, isq, cfq, bsq, isa, cfa, bsa, currency, month, naming,
               fcf, ebitda, borrow, cash_sti) -> str:
-    parts = ["## 10. Statements appendix (standalone, latest first; – = not filed / not tagged)"]
+    parts = [
+        "## 10. Statements appendix (standalone, latest first; – = not filed / not tagged)",
+        "Sign convention: appendix cash-flow capex is as the source reports it "
+        "(Yahoo: typically negative outflow; EDGAR: typically positive spend). "
+        "Core Capex (spend) rows are normalized to positive spend.",
+    ]
     for title, table, extra in (
         ("10.1 Balance sheet, quarterly", bsq, {"Cash + STI": cash_sti, "Borrowings": borrow}),
         ("10.2 Income statement, quarterly", isq, {"EBITDA (D)": ebitda}),
@@ -1209,7 +1277,12 @@ def _appendix(inputs, isq, cfq, bsq, isa, cfa, bsa, currency, month, naming,
                 continue
             seen_vals.append(vals)
             kind = "eps" if _is_eps(name) else ("shares" if _is_shares(name) else "amount")
-            rows.append((name, [_cell(vals, i, currency, kind=kind) for i in range(len(headers))]))
+            label = name
+            if name.lower() in {"capital expenditure", "capex"}:
+                conv = ("Yahoo typically negative outflow" if table.source == "yahoo"
+                        else "EDGAR typically positive spend")
+                label = f"{name} (source sign; {conv})"
+            rows.append((label, [_cell(vals, i, currency, kind=kind) for i in range(len(headers))]))
         for name, vals in extra.items():
             if vals:
                 rows.append((name, [_cell(vals, i, currency, derived=True) for i in range(len(headers))]))
@@ -1377,6 +1450,15 @@ def fetch_packet_inputs(ticker: str, as_of: str) -> PacketInputs:
     except Exception as exc:  # noqa: BLE001
         logger.debug("insiders failed: %s", exc)
         inputs.insiders = InsiderSummary(raw_missing=True)
+    try:
+        events, flags = load_subsequent_events(ticker, as_of, latest_period_end(inputs))
+        inputs.subsequent_events = events
+        inputs.extra_flags.extend(flags)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("subsequent events failed: %s", exc)
+        inputs.extra_flags.append(
+            f"SUBSEQUENT EVENTS: 8-K fetch failed ({type(exc).__name__}); section omitted"
+        )
     return inputs
 
 
