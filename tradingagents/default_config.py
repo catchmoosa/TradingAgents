@@ -169,6 +169,14 @@ def build_default_config() -> dict:
         "tool_vendors": {
             # Example: "get_stock_data": "alpha_vantage",  # Override category default
         },
+        # Fundamentals analyst: one labelled packet by default. Set True to also
+        # offer the raw Yahoo/EDGAR statement tools (debug / comparison).
+        "fundamentals_raw_tools": False,
+        # Optional number check of the fundamentals report against the packet:
+        # one retry, then a footnote; never blocks the run.
+        "fundamentals_number_check": True,
+        # Timezone for "today" in coverage_gap (None = the process local zone).
+        "now_timezone": None,
         # Benchmark for alpha calculation in the reflection layer.
         # ``benchmark_ticker`` (when set) overrides the suffix map for all
         # tickers; leave it None to use ``benchmark_map`` for auto-detection

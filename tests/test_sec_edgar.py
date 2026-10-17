@@ -105,7 +105,7 @@ def test_the_quarter_is_not_confused_with_the_year_to_date():
 @pytest.mark.unit
 def test_a_line_the_filer_does_not_tag_is_named_unavailable():
     out = sec_edgar.get_balance_sheet("AAPL", "annual", "2024-11-15")
-    assert "Stockholders Equity" in out and "unavailable" in out
+    assert "Stockholders Equity" in out and "not tagged" in out
     assert "364980" in out  # the rest of the statement still returns
 
 

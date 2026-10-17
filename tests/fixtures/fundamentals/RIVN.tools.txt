@@ -1,0 +1,131 @@
+
+######## get_fundamentals ('RIVN', '2026-10-16')
+# Company Fundamentals for RIVN
+
+Name: Rivian Automotive, Inc.
+Sector: Consumer Cyclical
+Industry: Auto Manufacturers
+Market Cap: 17982429184 USD
+Forward PE: -7.15747
+Price to Book: 3.3128834
+EPS (TTM): -2.58 USD
+Forward EPS: -1.73525 USD
+Dividend Yield: 0.0%
+Beta: 1.622
+52 Week High: 22.69 USD
+52 Week Low: 12.36 USD
+50 Day Average: 15.2794 USD
+200 Day Average: 15.82875 USD
+Revenue (TTM): 5882999808 USD
+Gross Profit: 442000000 USD
+EBITDA: -2713999872 USD
+Net Income: -3232999936 USD
+Profit Margin: -0.54955
+Operating Margin: -0.50422
+Return on Equity: -0.57523
+Return on Assets: -0.14368
+Debt to Equity: 104.408% (1.04x)
+Current Ratio: 2.104
+Book Value: 3.749 USD
+Free Cash Flow: -1539374976 USD
+
+######## get_balance_sheet ('RIVN', 'quarterly', '2026-10-16')
+# Balance Sheet for RIVN (quarterly), USD in millions unless the row says otherwise
+# SEC EDGAR facts filed on or before 2026-10-16, at the values filed then. Latest periods first; missing cells say 'not filed'
+
+,Q2 FY2026 ended 2026-06-30,Q1 FY2026 ended 2026-03-31,FY2025 ended 2025-12-31,Q3 FY2025 ended 2025-09-30,Q2 FY2025 ended 2025-06-30,Q1 FY2025 ended 2025-03-31,FY2024 ended 2024-12-31,Q3 FY2024 ended 2024-09-30
+Total Assets,15140,14233,14864,15217,15597,15505,15410,14262
+Current Assets,7618,7045,8592,9275,10120,10394,10583,9837
+Cash and Equivalents,3592,2845,3579,4441,4812,4693,5294,5396
+Short-Term Investments,1718,1985,2503,2647,2696,2485,2406,1343
+Total Liabilities,10013,9804,10270,10133,9518,9275,8848,8363
+Current Liabilities,3620,3353,3693,3425,2943,2788,2251,1933
+Stockholders Equity,5127,4429,4594,5084,6079,6230,6562,5899
+Cash and Short-Term Investments,5310,4830,6082,7088,7508,7178,7700,6739
+
+
+######## get_cashflow ('RIVN', 'quarterly', '2026-10-16')
+# Cash Flow Statement for RIVN (quarterly), USD in millions unless the row says otherwise
+# SEC EDGAR facts filed on or before 2026-10-16, at the values filed then. Latest periods first; missing cells say 'not filed'
+
+,Q2 FY2026 ended 2026-06-30 (6 months),Q1 FY2026 ended 2026-03-31,Q3 FY2025 ended 2025-09-30 (9 months),Q2 FY2025 ended 2025-06-30 (6 months),Q1 FY2025 ended 2025-03-31,Q3 FY2024 ended 2024-09-30 (9 months),Q2 FY2024 ended 2024-06-30 (6 months),Q1 FY2024 ended 2024-03-31
+Operating Cash Flow,-1190,-703,-98,-124,-188,-2899,-2023,-1269
+Investing Cash Flow,-125,-25,-1507,-1114,-408,-594,-1095,-606
+Financing Cash Flow,1330,-2,747,750,-6,1032,1028,-2
+Capital Expenditure,734,372,1247,800,338,814,537,254
+
+
+######## get_income_statement ('RIVN', 'quarterly', '2026-10-16')
+# Income Statement for RIVN (quarterly), USD in millions unless the row says otherwise
+# SEC EDGAR facts filed on or before 2026-10-16, at the values filed then. Latest periods first; missing cells say 'not filed'
+
+,Q2 FY2026 ended 2026-06-30,Q1 FY2026 ended 2026-03-31,Q3 FY2025 ended 2025-09-30,Q2 FY2025 ended 2025-06-30,Q1 FY2025 ended 2025-03-31,Q3 FY2024 ended 2024-09-30,Q2 FY2024 ended 2024-06-30,Q1 FY2024 ended 2024-03-31
+Revenue,1658,1381,1558,1303,1240,874,1158,1204
+Cost of Revenue,1479,1262,1534,1509,1034,1266,1609,1731
+Gross Profit,179,119,24,-206,206,-392,-451,-527
+Operating Income,-836,-881,-983,-1114,-655,-1169,-1375,-1484
+Net Income,-833,-416,-1173,-1117,-545,-1100,-1457,-1446
+Diluted EPS (USD/shares),-0.63,-0.33,-0.96,-0.97,-0.48,-1.08,-1.46,-1.48
+# YoY on matching fiscal periods; use these rather than aligning columns yourself
+Revenue: Q2 FY2026 ended 2026-06-30 vs Q2 FY2025 ended 2025-06-30: 1658 vs 1303 (+27.2%)
+Revenue: Q1 FY2026 ended 2026-03-31 vs Q1 FY2025 ended 2025-03-31: 1381 vs 1240 (+11.4%)
+Revenue: Q3 FY2025 ended 2025-09-30 vs Q3 FY2024 ended 2024-09-30: 1558 vs 874 (+78.3%)
+Revenue: Q2 FY2025 ended 2025-06-30 vs Q2 FY2024 ended 2024-06-30: 1303 vs 1158 (+12.5%)
+Revenue: Q1 FY2025 ended 2025-03-31 vs Q1 FY2024 ended 2024-03-31: 1240 vs 1204 (+3.0%)
+Revenue: Q3 FY2024 ended 2024-09-30 vs Q3 FY2023 ended 2023-09-30: 874 vs 1337 (-34.6%)
+Revenue: Q2 FY2024 ended 2024-06-30 vs Q2 FY2023 ended 2023-06-30: 1158 vs 1121 (+3.3%)
+Revenue: Q1 FY2024 ended 2024-03-31 vs Q1 FY2023 ended 2023-03-31: 1204 vs 661 (+82.1%)
+Net Income: Q2 FY2026 ended 2026-06-30 vs Q2 FY2025 ended 2025-06-30: -833 vs -1117 (+25.4%)
+Net Income: Q1 FY2026 ended 2026-03-31 vs Q1 FY2025 ended 2025-03-31: -416 vs -545 (+23.7%)
+Net Income: Q3 FY2025 ended 2025-09-30 vs Q3 FY2024 ended 2024-09-30: -1173 vs -1100 (-6.6%)
+Net Income: Q2 FY2025 ended 2025-06-30 vs Q2 FY2024 ended 2024-06-30: -1117 vs -1457 (+23.3%)
+Net Income: Q1 FY2025 ended 2025-03-31 vs Q1 FY2024 ended 2024-03-31: -545 vs -1446 (+62.3%)
+Net Income: Q3 FY2024 ended 2024-09-30 vs Q3 FY2023 ended 2023-09-30: -1100 vs -1367 (+19.5%)
+Net Income: Q2 FY2024 ended 2024-06-30 vs Q2 FY2023 ended 2023-06-30: -1457 vs -1195 (-21.9%)
+Net Income: Q1 FY2024 ended 2024-03-31 vs Q1 FY2023 ended 2023-03-31: -1446 vs -1349 (-7.2%)
+
+
+######## get_cashflow ('RIVN', 'annual', '2026-10-16')
+# Cash Flow Statement for RIVN (annual), USD in millions unless the row says otherwise
+# SEC EDGAR facts filed on or before 2026-10-16, at the values filed then. Latest periods first; missing cells say 'not filed'
+
+,FY2025 ended 2025-12-31,FY2024 ended 2024-12-31,FY2023 ended 2023-12-31,FY2022 ended 2022-12-31
+Operating Cash Flow,-779,-1716,-4866,-5052
+Investing Cash Flow,-1828,-1980,-2511,-1369
+Financing Cash Flow,886,1136,3130,99
+Capital Expenditure,1710,1141,1026,1369
+
+
+######## get_income_statement ('RIVN', 'annual', '2026-10-16')
+# Income Statement for RIVN (annual), USD in millions unless the row says otherwise
+# SEC EDGAR facts filed on or before 2026-10-16, at the values filed then. Latest periods first; missing cells say 'not filed'
+
+,FY2025 ended 2025-12-31,FY2024 ended 2024-12-31,FY2023 ended 2023-12-31,FY2022 ended 2022-12-31
+Revenue,5387,4970,4434,1658
+Cost of Revenue,5243,6170,6464,4781
+Gross Profit,144,-1200,-2030,-3123
+Operating Income,-3585,-4689,-5739,-6856
+Net Income,-3646,-4747,-5432,-6752
+Diluted EPS (USD/shares),-3.07,-4.69,-5.74,-7.40
+# YoY on matching fiscal periods; use these rather than aligning columns yourself
+Revenue: FY2025 ended 2025-12-31 vs FY2024 ended 2024-12-31: 5387 vs 4970 (+8.4%)
+Revenue: FY2024 ended 2024-12-31 vs FY2023 ended 2023-12-31: 4970 vs 4434 (+12.1%)
+Revenue: FY2023 ended 2023-12-31 vs FY2022 ended 2022-12-31: 4434 vs 1658 (+167.4%)
+Net Income: FY2025 ended 2025-12-31 vs FY2024 ended 2024-12-31: -3646 vs -4747 (+23.2%)
+Net Income: FY2024 ended 2024-12-31 vs FY2023 ended 2023-12-31: -4747 vs -5432 (+12.6%)
+Net Income: FY2023 ended 2023-12-31 vs FY2022 ended 2022-12-31: -5432 vs -6752 (+19.5%)
+Net Income: FY2022 ended 2022-12-31 vs FY2021 ended 2019-12-31: -6752 vs -426 (-1485.0%)
+
+
+######## get_earnings_context ('RIVN', '2026-10-16')
+# Earnings context for RIVN
+# Point-in-time as of: 2026-10-16
+
+Next earnings date: 2026-10-29
+
+Recent earnings surprises (most recent first):
+2026-07-30: reported EPS -0.63; estimate -0.78; surprise +18.9%
+2026-04-30: reported EPS -0.55; estimate -0.6; surprise +8.7%
+2026-02-12: reported EPS -0.66; estimate -0.79; surprise +16.6%
+2025-11-04: reported EPS -0.96; estimate -0.86; surprise -11.1%
+

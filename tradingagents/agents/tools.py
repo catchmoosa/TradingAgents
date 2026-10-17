@@ -186,6 +186,28 @@ def get_earnings_context(
 
 
 @tool
+def get_fundamentals_packet(
+    ticker: Annotated[str, InjectedState("company_of_interest")],
+    curr_date: Annotated[str, "current date you are trading at, yyyy-mm-dd"],
+    trade_date: Annotated[str, InjectedState("trade_date")] = "",
+) -> str:
+    """Fully labelled fundamentals packet: statements, TTM, margins, FCF, runway,
+    valuation at the point-in-time last close, capital returns, and a statements
+    appendix. Every figure already has its period, unit and basis; do not
+    recompute. Uses the last close as the current price, not a moving average.
+    """
+    import tradingagents.dataflows.fundamentals_packet as packet_mod
+
+    day = as_of(curr_date, trade_date)
+    try:
+        return packet_mod.render_fundamentals_packet(ticker, day)
+    except VendorUnavailableError as exc:
+        return vendor_unavailable("get_fundamentals_packet", exc)
+    except NoMarketDataError as exc:
+        return no_data_available(exc)
+
+
+@tool
 def get_news(
     ticker: Annotated[str, InjectedState("company_of_interest")],
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],

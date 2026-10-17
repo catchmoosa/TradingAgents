@@ -61,7 +61,9 @@ def _coverage_dates(posts) -> list:
     themselves do."""
     dates = [_posted_at(p) for p in posts]
     if len(posts) < _FEED_PAGE:
-        dates.append(datetime.now(UTC) - _SEARCH_LOOKBACK)
+        from tradingagents.dataflows.date_window import now_datetime
+
+        dates.append(now_datetime() - _SEARCH_LOOKBACK)
     return dates
 
 

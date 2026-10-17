@@ -60,6 +60,7 @@ class Propagator:
             ),
             "market_report": "",
             "fundamentals_report": "",
+            "fundamentals_packet_summary": "",
             "sentiment_report": "",
             "news_report": "",
         }

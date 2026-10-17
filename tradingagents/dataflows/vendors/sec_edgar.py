@@ -43,6 +43,8 @@ _CACHE_TTL_SECONDS = 24 * 60 * 60
 # Line items, each with the tags filers use for it, best first. First match wins
 # and values are never summed across tags: a company reporting revenue under two
 # tags would otherwise be counted twice.
+# ~50 us-gaap concepts with fallbacks. First match wins; values are never summed
+# across tags. An untagged line is printed as "not tagged".
 _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
     "balance_sheet": [
         ("Total Assets", ("Assets",)),
@@ -54,19 +56,62 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
                                     "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
                                     "DebtSecuritiesCurrent",
                                     "OtherShortTermInvestments")),
+        ("Inventory", ("InventoryNet", "Inventory")),
+        ("Receivables", ("AccountsReceivableNetCurrent", "AccountsReceivableNet",
+                         "ReceivablesNetCurrent")),
+        ("Net PP&E", ("PropertyPlantAndEquipmentNet",)),
+        ("Goodwill", ("Goodwill",)),
+        ("Other Intangibles", ("IntangibleAssetsNetExcludingGoodwill",)),
         ("Total Liabilities", ("Liabilities",)),
         ("Current Liabilities", ("LiabilitiesCurrent",)),
+        ("Accounts Payable", ("AccountsPayableCurrent", "AccountsPayable")),
+        ("Accrued Liabilities", ("AccruedLiabilitiesCurrent", "AccruedLiabilities")),
+        ("Deferred Revenue", ("ContractWithCustomerLiabilityCurrent",
+                              "DeferredRevenueCurrent", "ContractWithCustomerLiability")),
+        ("Current Debt", ("LongTermDebtCurrent", "DebtCurrent",
+                          "ShortTermBorrowings")),
+        ("Long-Term Debt", ("LongTermDebtNoncurrent", "LongTermDebt",
+                            "LongTermDebtAndCapitalLeaseObligations")),
+        ("Debt (carrying value)", ("DebtInstrumentCarryingAmount",)),
+        ("Operating Lease Liabilities (current)", ("OperatingLeaseLiabilityCurrent",)),
+        ("Operating Lease Liabilities (noncurrent)", ("OperatingLeaseLiabilityNoncurrent",)),
         ("Stockholders Equity", ("StockholdersEquity",
                                  "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")),
+        ("Retained Earnings", ("RetainedEarningsAccumulatedDeficit",)),
+        ("Treasury Stock", ("TreasuryStockValue",)),
+        ("Minority Interest", ("MinorityInterest",
+                               "NoncontrollingInterestInConsolidatedEntity")),
+        ("Shares Outstanding", ("CommonStockSharesOutstanding",
+                                "EntityCommonStockSharesOutstanding")),
+        ("Shares Issued", ("CommonStockSharesIssued",)),
     ],
     "income_statement": [
         ("Revenue", ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
                      "SalesRevenueNet")),
         ("Cost of Revenue", ("CostOfRevenue", "CostOfGoodsAndServicesSold")),
         ("Gross Profit", ("GrossProfit",)),
+        ("R&D", ("ResearchAndDevelopmentExpense",)),
+        ("SG&A", ("SellingGeneralAndAdministrativeExpense",)),
+        ("Operating Expenses", ("OperatingExpenses", "CostsAndExpenses")),
         ("Operating Income", ("OperatingIncomeLoss",)),
+        ("Interest Income", ("InvestmentIncomeInterest", "InterestAndDividendIncomeOperating")),
+        ("Interest Expense", ("InterestExpense",)),
+        ("Pretax Income", (
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        )),
+        ("Tax Provision", ("IncomeTaxExpenseBenefit",)),
+        ("Net Income (continuing)", ("IncomeLossFromContinuingOperations",)),
+        ("Net Income (discontinued)", ("IncomeLossFromDiscontinuedOperationsNetOfTax",)),
         ("Net Income", ("NetIncomeLoss",)),
+        ("Minority Interest in Earnings", (
+            "NetIncomeLossAttributableToNoncontrollingInterest",
+        )),
         ("Diluted EPS", ("EarningsPerShareDiluted",)),
+        ("Basic EPS", ("EarningsPerShareBasic",)),
+        ("Diluted Average Shares", ("WeightedAverageNumberOfDilutedSharesOutstanding",
+                                    "WeightedAverageNumberOfShareOutstandingChangeNumberOfSharesDiluted")),
+        ("Basic Average Shares", ("WeightedAverageNumberOfSharesOutstandingBasic",)),
     ],
     "cashflow": [
         ("Operating Cash Flow", ("NetCashProvidedByUsedInOperatingActivities",
@@ -75,6 +120,31 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("Financing Cash Flow", ("NetCashProvidedByUsedInFinancingActivities",)),
         ("Capital Expenditure", ("PaymentsToAcquirePropertyPlantAndEquipment",
                                  "PaymentsToAcquireProductiveAssets")),
+        ("Depreciation and Amortization", ("DepreciationDepletionAndAmortization",
+                                           "DepreciationAndAmortization")),
+        ("Share-based Compensation", ("ShareBasedCompensation",)),
+        ("Change in Inventory", ("IncreaseDecreaseInInventories",)),
+        ("Change in Receivables", ("IncreaseDecreaseInAccountsReceivable",)),
+        ("Change in Payables", ("IncreaseDecreaseInAccountsPayable",
+                                "IncreaseDecreaseInAccountsPayableTrade")),
+        ("Acquisitions", ("PaymentsToAcquireBusinessesNetOfCashAcquired",
+                          "PaymentsToAcquireBusinessesAndInterestInAffiliates")),
+        ("Divestitures", ("ProceedsFromDivestitureOfBusinessesNetOfCashDivested",
+                          "ProceedsFromDivestitureOfBusinesses")),
+        ("Purchases of Investments", ("PaymentsToAcquireInvestments",
+                                      "PaymentsToAcquireMarketableSecurities")),
+        ("Sales of Investments", ("ProceedsFromSaleMaturityAndCollectionsOfInvestments",
+                                  "ProceedsFromSaleAndMaturityOfMarketableSecurities",
+                                  "ProceedsFromSaleOfAvailableForSaleSecurities")),
+        ("Debt Issuance", ("ProceedsFromIssuanceOfLongTermDebt",
+                           "ProceedsFromIssuanceOfDebt")),
+        ("Debt Repayment", ("RepaymentsOfLongTermDebt", "RepaymentsOfDebt")),
+        ("Equity Issuance", ("ProceedsFromIssuanceOfCommonStock",
+                             "ProceedsFromIssuanceOrSaleOfEquity")),
+        ("Buybacks", ("PaymentsForRepurchaseOfCommonStock",)),
+        ("Dividends Paid", ("PaymentsOfDividends", "PaymentsOfDividendsCommonStock")),
+        ("Foreign Exchange Effect", ("EffectOfExchangeRateOnCashAndCashEquivalents",)),
+        ("Ending Cash", ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",)),
     ],
 }
 
@@ -102,6 +172,7 @@ _RECENT_YEARS = 4
 # nothing recent to offer, so the router should try the next vendor.
 _STALE_AFTER = timedelta(days=456)
 _BLANK = "not filed"
+_NOT_TAGGED = "not tagged"
 _YOY_ROWS = ("Revenue", "Net Income")
 _COMBINED_CASH_TAGS = ("CashCashEquivalentsAndShortTermInvestments",)
 
@@ -325,7 +396,8 @@ def _prior_year_value(end: str, index: int, values: dict, meta: dict):
                 continue
             if (_fiscal_year(prior_info.get("fy")) == fy - 1
                     and str(prior_info.get("fp") or "").upper() == want_fp
-                    and (prior_end, prior_index) in values):
+                    and (prior_end, prior_index) in values
+                    and _year_apart(end, prior_end)):
                 return prior_end, values[(prior_end, prior_index)]
     try:
         target = date.fromisoformat(end).replace(year=date.fromisoformat(end).year - 1)
@@ -344,6 +416,15 @@ def _prior_year_value(end: str, index: int, values: dict, meta: dict):
     if best:
         return best[1], values[(best[1], index)]
     return None
+
+
+def _year_apart(end: str, prior_end: str, slop: int = 50) -> bool:
+    """YoY only compares periods about one year apart, not a fy label alone."""
+    try:
+        delta = (date.fromisoformat(end) - date.fromisoformat(prior_end)).days
+    except ValueError:
+        return False
+    return 365 - slop <= delta <= 366 + slop
 
 
 def _combined_cash_row(us_gaap: dict, as_of_date: str, spans, forms, lines, chosen, periods) -> str:
@@ -368,7 +449,7 @@ def _combined_cash_row(us_gaap: dict, as_of_date: str, spans, forms, lines, chos
     return ",".join(["Cash and Short-Term Investments"] + cells)
 
 
-def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -> str:
+def _load_facts(ticker: str, as_of_date: str) -> tuple[str, dict, dict]:
     as_of_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
     cik = cik_for(ticker)
     if cik is None:
@@ -382,7 +463,10 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         if "ifrs-full" in namespaces:
             detail += " (IFRS facts only; falling through)"
         raise NoMarketDataError(ticker, ticker, detail)
+    return as_of_date, us_gaap, namespaces
 
+
+def _span_setup(freq: str):
     quarterly = freq.lower() == "quarterly"
     if quarterly:
         spans = (_SPANS["quarterly"], *((low, high) for low, high, _ in _YEAR_TO_DATE))
@@ -390,6 +474,12 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     else:
         spans, names = (_SPANS["annual"],), [""]
     forms = () if quarterly else _ANNUAL_FORMS
+    return quarterly, spans, names, forms
+
+
+def _collect(kind: str, ticker: str, freq: str, as_of_date: str, title: str):
+    as_of_date, us_gaap, _namespaces = _load_facts(ticker, as_of_date)
+    quarterly, spans, names, forms = _span_setup(freq)
     lines: dict[str, tuple[dict, str]] = {}
     metas: dict[str, dict] = {}
     for label, tags in _STATEMENTS[kind]:
@@ -418,6 +508,13 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         raise NoMarketDataError(ticker, ticker, f"no {freq} {title.lower()} filed by {as_of_date}")
 
     periods = _limit_periods(periods, quarterly)
+    return as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods
+
+
+def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -> str:
+    as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods = _collect(
+        kind, ticker, freq, as_of_date, title,
+    )
     unit = _header_unit(lines)
     header = (
         f"# {title} for {ticker.upper()} ({freq}), {unit} in millions unless the row says otherwise\n"
@@ -430,7 +527,7 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     for label, (values, row_unit) in lines.items():
         # Every row spans the same columns, or a reader lines the table up wrong.
         if not values:
-            rows.append(",".join([label] + ["unavailable (not tagged by this filer)"] * len(periods)))
+            rows.append(",".join([label] + [_NOT_TAGGED] * len(periods)))
             continue
         name = label if row_unit == "USD" else f"{label} ({row_unit})"
         # Plain numbers: a thousands separator would split the CSV field.
@@ -441,6 +538,62 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         rows.append(_combined_cash_row(us_gaap, as_of_date, spans, forms, lines, chosen, periods))
     body = header + "\n".join(rows) + "\n"
     return body + _yoy_block(lines, metas, chosen, periods, names)
+
+
+def statement_table(kind: str, ticker: str, freq: str, as_of_date: str | None = None):
+    """Structured statement (native units) for the fundamentals packet."""
+    from tradingagents.dataflows.statement_tables import PeriodCol, StatementTable
+
+    title = {"balance_sheet": "Balance Sheet", "income_statement": "Income Statement",
+             "cashflow": "Cash Flow Statement"}[kind]
+    as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods = _collect(
+        kind, ticker, freq, as_of_date, title,
+    )
+    currency = _header_unit(lines)
+    instant = kind == "balance_sheet"
+    columns = []
+    for end, index in periods:
+        info = _info_for(end, index, metas)
+        if instant:
+            span_months = 0
+        elif not quarterly:
+            span_months = 12
+        else:
+            span_months = 3 if index == 0 else (6 if index == 1 else 9 if index == 2 else 12)
+        fp = str(info.get("fp") or "").upper() or ("FY" if not quarterly else None)
+        columns.append(PeriodCol(
+            end=end, fy=_fiscal_year(info.get("fy")), fp=fp or None,
+            span_months=span_months, filed=None, form=info.get("form") or None,
+            source_label=_column_label(end, index, names, info),
+        ))
+    rows: dict[str, list[float | None]] = {}
+    unscaled: set[str] = set()
+    for label, (values, unit) in lines.items():
+        rows[label] = [_value_at(values, chosen[label], end, index) for end, index in periods]
+        if not unit or "/" in unit or "share" in unit.lower():
+            unscaled.add(label)
+    if kind == "balance_sheet":
+        tagged, _unit, _meta = _as_of(us_gaap, _COMBINED_CASH_TAGS, as_of_date, spans, forms)
+        cash_vals, _cash_unit = lines["Cash and Equivalents"]
+        sti_vals, _ = lines["Short-Term Investments"]
+        cells = []
+        for end, index in periods:
+            tagged_val = tagged.get((end, index))
+            cash = _value_at(cash_vals, chosen["Cash and Equivalents"], end, index)
+            sti = _value_at(sti_vals, chosen["Short-Term Investments"], end, index)
+            if tagged_val is not None:
+                cells.append(tagged_val)
+            elif cash is not None and sti is not None:
+                cells.append(cash + sti)
+            elif cash is not None and not sti_vals:
+                cells.append(cash)
+            else:
+                cells.append(None)
+        rows["Cash and Short-Term Investments"] = cells
+    return StatementTable(
+        kind=kind, freq=freq.lower(), source="edgar", currency=currency,
+        scale=1.0, columns=columns, rows=rows, unscaled_rows=unscaled,
+    )
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", as_of_date: str | None = None) -> str:
