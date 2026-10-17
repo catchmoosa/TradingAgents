@@ -1946,7 +1946,10 @@ def _fetch_fund(ticker: str, info: dict) -> FundSnapshot:
         name=info.get("longName") or info.get("shortName"),
         family=info.get("fundFamily") or info.get("family"),
         category=info.get("category"),
-        expense_ratio=_maybe_pct(info.get("annualReportExpenseRatio") or info.get("expenseRatio")),
+        expense_ratio=_maybe_expense(
+            info.get("annualReportExpenseRatio") or info.get("expenseRatio")
+            or info.get("netExpenseRatio")
+        ),
         aum=info.get("totalAssets"),
         yield_ttm=_maybe_pct(info.get("yield") or info.get("trailingAnnualDividendYield")),
         nav=info.get("navPrice") or info.get("previousClose"),
@@ -1959,12 +1962,14 @@ def _fetch_fund(ticker: str, info: dict) -> FundSnapshot:
         return snap
     if funds is None:
         return snap
-    overview = getattr(funds, "fund_overview", None) or {}
+    overview = getattr(funds, "fund_overview", None)
     if isinstance(overview, dict):
-        snap.expense_ratio = snap.expense_ratio or _maybe_pct(overview.get("AnnualReportExpenseRatio"))
+        snap.expense_ratio = snap.expense_ratio or _maybe_expense(
+            overview.get("AnnualReportExpenseRatio")
+        )
         snap.family = snap.family or overview.get("Family")
         snap.category = snap.category or overview.get("CategoryName")
-    bond = getattr(funds, "bond_holdings", None) or {}
+    bond = getattr(funds, "bond_holdings", None)
     if isinstance(bond, dict):
         snap.duration = _maybe_float(bond.get("duration") or bond.get("Duration"))
         snap.ytm = _maybe_pct(bond.get("maturity") or bond.get("YTM") or bond.get("yieldToMaturity"))
@@ -2005,6 +2010,14 @@ def _maybe_pct(value) -> float | None:
     if number is None:
         return None
     return number * 100 if abs(number) <= 1 else number
+
+
+def _maybe_expense(value) -> float | None:
+    """Expense ratio: yfinance uses 0.0059 (fraction) or 0.59 (already percent)."""
+    number = _maybe_float(value)
+    if number is None:
+        return None
+    return number * 100 if abs(number) <= 0.2 else number
 
 
 def packet_summary_markdown(markdown: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,7 +13,9 @@ from tradingagents.dataflows.fundamentals_packet import (
     FundSnapshot,
     PacketInputs,
     PricePoint,
+    _fetch_fund,
     _holdings_from_frame,
+    _maybe_expense,
     _maybe_pct,
     build_packet,
     load_tool_dump,
@@ -438,6 +441,8 @@ def test_etf_holding_percent_fraction_is_scaled():
     assert _maybe_pct(0.0059) == pytest.approx(0.59)
     assert _maybe_pct(0.0231) == pytest.approx(2.31)
     assert _maybe_pct(0.048) == pytest.approx(4.8)
+    assert _maybe_expense(0.0059) == pytest.approx(0.59)
+    assert _maybe_expense(0.59) == pytest.approx(0.59)
     packet = build_packet(PacketInputs(
         ticker="TCHI", as_of="2026-10-17", quote_type="ETF",
         price=PricePoint(close=20.0, day="2026-10-17"),
@@ -453,3 +458,30 @@ def test_etf_holding_percent_fraction_is_scaled():
     assert "0.05%" not in holdings
     assert "0.59%" in packet.markdown
     assert "2.31%" in packet.markdown
+
+
+@pytest.mark.unit
+def test_equity_etf_bond_holdings_dataframe_does_not_break_fetch(monkeypatch):
+    """yfinance may give an empty DataFrame for bond_holdings on equity ETFs."""
+    import pandas as pd
+
+    holdings = pd.DataFrame({"holdingPercent": [0.0496]}, index=["Tencent"])
+    funds = MagicMock()
+    funds.fund_overview = {"AnnualReportExpenseRatio": 0.0059}
+    funds.bond_holdings = pd.DataFrame()
+    funds.top_holdings = holdings
+    ticker = MagicMock()
+    ticker.funds_data = funds
+    monkeypatch.setattr(
+        "tradingagents.dataflows.vendors.yahoo.common.yf_retry",
+        lambda fn: fn(),
+    )
+    import yfinance as yf
+    monkeypatch.setattr(yf, "Ticker", lambda _t: ticker)
+    snap = _fetch_fund("TCHI", {
+        "quoteType": "ETF", "netExpenseRatio": 0.59, "yield": 0.0231,
+    })
+    assert snap.top_holdings[0][1] == pytest.approx(4.96)
+    assert snap.expense_ratio == pytest.approx(0.59)
+    assert snap.yield_ttm == pytest.approx(2.31)
+    assert snap.duration is None
