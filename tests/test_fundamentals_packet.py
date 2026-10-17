@@ -61,6 +61,8 @@ def test_rivn_packet_required_figures():
     assert "5,310" in text
     assert "1,661" in text
     assert "433" in text
+    assert "USD M" in text
+    assert "Statements in USD" in text
 
 
 @pytest.mark.unit
@@ -75,6 +77,8 @@ def test_sony_packet_required_figures():
     assert round(m["ttm_fcf"] / 1e9, 1) == 1590.3
     assert m["capital_return_ttm"] is not None
     assert round(m["capital_return_ttm"] / 1e9, 1) == 704.8
+    assert "JPY bn" in packet.markdown
+    assert "Statements in JPY" in packet.markdown
     assert "Q1 FY2026" in packet.markdown
     assert "Apr-Jun 2026" in packet.markdown or "Apr–Jun 2026" in packet.markdown
     # Year-end Yahoo columns are Q4, not a full-year figure parked in the quarter table.

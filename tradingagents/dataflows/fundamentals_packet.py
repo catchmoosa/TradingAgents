@@ -183,8 +183,10 @@ class PacketInputs:
     statements: dict[str, StatementTable] = field(default_factory=dict)
     yahoo_info: dict[str, Any] = field(default_factory=dict)
     price: PricePoint | None = None
-    fx_usd: float | None = None
+    fx_usd: float | None = None  # reporting units per 1 valuation unit (e.g. JPY per USD)
     fx_pair: str | None = None
+    fx_day: str | None = None
+    fx_source: str | None = None
     home_price: PricePoint | None = None
     next_earnings: str | None = None
     surprises: list[EarningsRow] = field(default_factory=list)
@@ -246,30 +248,129 @@ def _as_outflow_positive(values: list[float | None]) -> list[float | None]:
     return _as_spend(values)
 
 
+_CCY_ALIASES = {"RMB": "CNY", "CNH": "CNY"}
+_MINOR_TO_MAJOR = {
+    "GBp": ("GBP", 100.0),
+    "GBX": ("GBP", 100.0),
+    "ZAc": ("ZAR", 100.0),
+    "ILA": ("ILS", 100.0),
+}
+# Yahoo ``CCY=X`` for these is USD per 1 CCY (EURUSD-style). Others are CCY per 1 USD.
+_USD_IS_QUOTE = frozenset({"EUR", "GBP", "AUD", "NZD"})
+_SUFFIX_QUOTE = {
+    ".TO": "CAD", ".V": "CAD", ".L": "GBp", ".AS": "EUR", ".PA": "EUR",
+    ".DE": "EUR", ".F": "EUR", ".T": "JPY", ".HK": "HKD", ".AX": "AUD",
+    ".CO": "DKK", ".ST": "SEK", ".SW": "CHF", ".OL": "NOK",
+}
+
+
+def normalize_ccy(raw: str | None) -> str | None:
+    """ISO code (or Yahoo minor unit like GBp). ``iso4217:CNY`` and RMB → CNY."""
+    if not raw:
+        return None
+    text = str(raw).strip()
+    if ":" in text:
+        text = text.split(":")[-1].strip()
+    if text in _MINOR_TO_MAJOR:
+        return text
+    if not text:
+        return None
+    upper = text.upper()
+    return _CCY_ALIASES.get(upper, upper)
+
+
+def major_unit(ccy: str | None) -> str:
+    code = normalize_ccy(ccy) or "USD"
+    if code in _MINOR_TO_MAJOR:
+        return _MINOR_TO_MAJOR[code][0]
+    return code
+
+
+def quote_to_major(amount: float, ccy: str | None) -> float:
+    """Pence/cents quote → major unit (GBp 2500 → 25 GBP)."""
+    code = normalize_ccy(ccy) or "USD"
+    if code in _MINOR_TO_MAJOR:
+        return amount / _MINOR_TO_MAJOR[code][1]
+    return amount
+
+
 def display_unit(currency: str) -> tuple[float, int, str]:
-    if (currency or "").upper() in {"JPY", "KRW"}:
+    code = normalize_ccy(currency) or "USD"
+    if code in {"JPY", "KRW"}:
         return 1e9, 1, "bn"
     return 1e6, 0, "M"
+
+
+def unit_label(currency: str) -> str:
+    """e.g. ``CNY M``, ``EUR M``, ``JPY bn``, ``USD M``."""
+    code = normalize_ccy(currency) or "USD"
+    _scale, _decimals, suffix = display_unit(code)
+    return f"{code} {suffix}"
 
 
 def fmt_amount(value: float | None, currency: str, *, signed: bool = True) -> str:
     if value is None:
         return "–"
-    scale, decimals, suffix = display_unit(currency)
+    code = normalize_ccy(currency) or (currency or "USD")
+    scale, decimals, suffix = display_unit(code)
     scaled = value / scale
     number = f"{scaled:,.{decimals}f}"
-    symbol = "¥" if currency.upper() == "JPY" else ("$" if currency.upper() == "USD" else "")
-    if signed and scaled < 0:
-        number = number  # already has minus
-    return f"{symbol}{number}{suffix}" if suffix else f"{symbol}{number}"
+    return f"{code} {number}{suffix}" if suffix else f"{code} {number}"
 
 
 def fmt_plain(value: float | None, currency: str) -> str:
-    """Amount without currency symbol, for table cells."""
+    """Amount without currency code, for table cells already labelled by the header."""
     if value is None:
         return "–"
     scale, decimals, _suffix = display_unit(currency)
     return f"{value / scale:,.{decimals}f}"
+
+
+def reporting_currency(inputs: PacketInputs) -> str:
+    """XBRL/Yahoo statement unit first; then ``financialCurrency``. Never the quote ccy."""
+    for key in (
+        "income_statement:quarterly", "income_statement:annual",
+        "balance_sheet:quarterly", "balance_sheet:annual",
+        "cashflow:quarterly", "cashflow:annual",
+    ):
+        table = inputs.statements.get(key)
+        if table is None:
+            continue
+        code = normalize_ccy(table.currency)
+        if code:
+            return code
+    return normalize_ccy(inputs.currency_report) or "USD"
+
+
+def quote_currency(ticker: str, info: dict | None = None) -> str:
+    info = info or {}
+    code = normalize_ccy(info.get("currency"))
+    if code:
+        return code
+    upper = (ticker or "").upper()
+    for suffix, ccy in _SUFFIX_QUOTE.items():
+        if upper.endswith(suffix):
+            return ccy
+    return "USD"
+
+
+def _fx_report_per_val(inputs: PacketInputs) -> float | None:
+    """Reporting-currency units per 1 valuation (major quote) unit."""
+    rate = inputs.fx_usd
+    if rate is None or rate == 0:
+        return None
+    return float(rate)
+
+
+def _to_valuation(amount: float | None, inputs: PacketInputs, report: str, val_ccy: str) -> float | None:
+    if amount is None:
+        return None
+    if (normalize_ccy(report) or report) == val_ccy:
+        return amount
+    rate = _fx_report_per_val(inputs)
+    if rate is None:
+        return None
+    return amount / rate
 
 
 def _pct(value: float | None) -> str:
@@ -544,7 +645,8 @@ def _annual_filled(inputs: PacketInputs, kind: str) -> StatementTable | None:
 
 
 def _build_equity(inputs: PacketInputs) -> Packet:
-    currency = inputs.currency_report or "USD"
+    currency = reporting_currency(inputs)
+    inputs.currency_report = currency
     month, naming = _fy_meta(inputs)
     isq = _stand(inputs, "income_statement", True)
     cfq = _stand(inputs, "cashflow", True)
@@ -626,7 +728,7 @@ def _build_equity(inputs: PacketInputs) -> Packet:
                 cont_eps.append(ni / share_n)
     ttm_ceps = ttm(cont_eps) if cont_eps else None
 
-    gm_ttm = (ttm_gp / ttm_rev * 100) if ttm_rev else None
+    gm_ttm = (ttm_gp / ttm_rev * 100) if ttm_rev and ttm_gp is not None else None
     om_ttm = (ttm_oi / ttm_rev * 100) if ttm_rev and ttm_oi is not None else None
     om_mrq = (oi_rep[0] / rev[0] * 100) if oi_rep and rev and oi_rep[0] is not None and rev[0] else None
     gm_q = [(g / r * 100) if g is not None and r else None for g, r in zip(gp, rev, strict=False)]
@@ -672,6 +774,13 @@ def _build_equity(inputs: PacketInputs) -> Packet:
 
     flags = list(inputs.extra_flags)
     flags.extend(_quality_flags(inputs, isq, cfq, bsq, ttm_fcf, ttm_ni, ttm_nic, pretax, ocf))
+    quote = normalize_ccy((inputs.price.currency if inputs.price else inputs.currency_price) or "USD") or "USD"
+    val_ccy = major_unit(quote)
+    if currency != val_ccy and _fx_report_per_val(inputs) is None:
+        flags.append(
+            f"CROSS-CURRENCY: statements in {currency}, price in {quote}; "
+            f"no FX rate on or before {inputs.as_of}. Valuation ratios omitted."
+        )
 
     metrics = {
         "ttm_fcf": ttm_fcf,
@@ -688,6 +797,11 @@ def _build_equity(inputs: PacketInputs) -> Packet:
         "runway_pro_forma_quarters": runway_pf,
         "subsequent_cash_in": cash_in or None,
     }
+    val_figs = _valuation_figures(
+        inputs, currency, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
+        cash0, total_debt[0] if total_debt else None, equity[0] if equity else None, ttm_ceps,
+    )
+    metrics.update(val_figs)
 
     markdown, summary, numbers = _render_equity(
         inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa,
@@ -882,7 +996,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
                    gp_streak, fcf_streak, yoy_rev, yoy_rev_pair, flags, metrics) -> tuple[str, str, list[float]]:
     ticker = inputs.ticker
     as_of = inputs.as_of
-    unit_name = "JPY bn" if currency == "JPY" else "USD M"
+    unit_name = unit_label(currency)
     qh = _q_headers(isq or cfq or bsq, month, naming)
     price = inputs.price
     last_close = f"**{price.currency} {price.close:.2f} on {price.day}**" if price else "n/a"
@@ -933,14 +1047,14 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
 |---|---|
 | As-of date | {as_of} (point-in-time: filings and prices on or before this date) |
 | Last close | {last_close} |
-| Price currency / reporting currency | {inputs.currency_price} / {currency}. Statement amounts are {unit_name} unless marked |
+| Currencies | {_currency_blurb(inputs, currency, unit_name)} |
 | Fiscal year | {fy_blurb} |
 | Next earnings | {inputs.next_earnings or "n/a"} |
 | Sources | Statements: {((isq or cfq or bsq).source if (isq or cfq or bsq) else "n/a")}. Price/estimates: yfinance |
 """
-    if inputs.fx_usd and currency != inputs.currency_price:
-        adr = _ADR_RATIO.get(ticker.upper(), 1)
-        header += f"| ADR ratio / FX | {adr} ADR = {adr} share. {inputs.fx_pair or 'USD/JPY'} {inputs.fx_usd:.2f} on {as_of} |\n"
+    if ticker.upper() in _ADR_RATIO:
+        adr = _ADR_RATIO[ticker.upper()]
+        header += f"| ADR ratio | {adr} ADR = {adr} share |\n"
     if inputs.home_price:
         header += (f"| Home listing | {inputs.home_price.close:,.0f} {inputs.home_price.currency} "
                    f"on {inputs.home_price.day} |\n")
@@ -1055,9 +1169,7 @@ def _render_equity(inputs, currency, month, naming, isq, cfq, bsq, isa, cfa, bsa
     a_table = _md_table(ah, a_rows)
 
     eps_table = _eps_section(inputs, isq, eps, cont_eps, month, naming)
-    val_table = _valuation_section(inputs, currency, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
-                                   cash0, total_debt[0] if total_debt else None, equity[0] if equity else None,
-                                   ttm_ceps)
+    val_table = _valuation_section(inputs, currency, metrics)
     cap_table = _capital_section(qh[:4], buy, divs, ttm_buy, ttm_div, currency, ttm_fcfc)
     insider = _insider_section(inputs)
     flags_md = "## 9. Data-quality flags\n" + "\n".join(f"- {f}" for f in flags)
@@ -1116,51 +1228,157 @@ def _eps_section(inputs, isq, eps, cont_eps, month, naming) -> str:
     return "\n".join(lines)
 
 
-def _valuation_section(inputs, currency, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
-                       cash0, total_debt0, equity0, ttm_ceps) -> str:
+def _currency_blurb(inputs: PacketInputs, report: str, unit_name: str) -> str:
+    quote = normalize_ccy((inputs.price.currency if inputs.price else inputs.currency_price) or "USD") or "USD"
+    val_ccy = major_unit(quote)
+    bits = [f"Statements in {report} ({unit_name})", f"share price in {quote}"]
+    if quote in _MINOR_TO_MAJOR:
+        major, scale = _MINOR_TO_MAJOR[quote]
+        bits.append(f"FX used: {scale:.0f} {quote} = 1 {major} (minor quote unit)")
+        if report != val_ccy:
+            bits.append(_fx_used_text(inputs, report, val_ccy))
+    elif report == val_ccy:
+        bits.append("FX used: none (same currency)")
+    else:
+        bits.append(_fx_used_text(inputs, report, val_ccy))
+    return "; ".join(bits)
+
+
+def _fx_used_text(inputs: PacketInputs, report: str, val_ccy: str) -> str:
+    rate = _fx_report_per_val(inputs)
+    if rate is None:
+        return "FX used: unavailable (valuation ratios omitted)"
+    day = inputs.fx_day or inputs.as_of
+    source = inputs.fx_source or (inputs.fx_pair or "yfinance")
+    return f"FX used: 1 {val_ccy} = {rate:,.4f} {report} on {day} ({source})"
+
+
+def _valuation_figures(inputs, report, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
+                       cash0, total_debt0, equity0, ttm_ceps) -> dict[str, float | None]:
+    price = inputs.price
+    info = inputs.yahoo_info
+    shares = info.get("sharesOutstanding") or info.get("Shares Outstanding__num")
+    quote = normalize_ccy((price.currency if price else inputs.currency_price) or "USD") or "USD"
+    val_ccy = major_unit(quote)
+    out: dict[str, float | None] = {
+        "mcap": None, "ev": None, "pe_ttm": None, "ev_ebitda": None, "ev_sales": None,
+        "ps": None, "pb": None, "fcf_yield": None, "cash_in_price_ccy": None,
+        "net_cash_per_share": None,
+    }
+    if price is None or shares in (None, 0):
+        return out
+    share_n = float(shares)
+    px = quote_to_major(price.close, quote)
+    mcap = px * share_n
+    out["mcap"] = mcap
+    same = (normalize_ccy(report) or report) == val_ccy
+    if not (same or _fx_report_per_val(inputs) is not None):
+        return out
+    cash_v = _to_valuation(cash0, inputs, report, val_ccy)
+    debt_v = _to_valuation(total_debt0, inputs, report, val_ccy)
+    eq_v = _to_valuation(equity0, inputs, report, val_ccy)
+    rev_v = _to_valuation(ttm_rev, inputs, report, val_ccy)
+    ni_src = ttm_nic if ttm_nic and ttm_nic > 0 else ttm_ni
+    ni_v = _to_valuation(ni_src, inputs, report, val_ccy)
+    ebitda_v = _to_valuation(ttm_ebitda, inputs, report, val_ccy)
+    fcf_v = _to_valuation(ttm_fcf, inputs, report, val_ccy)
+    out["cash_in_price_ccy"] = cash_v
+    if cash_v is not None and debt_v is not None:
+        ev = mcap + debt_v - cash_v
+        out["ev"] = ev
+        if rev_v:
+            out["ev_sales"] = ev / rev_v
+        if ebitda_v and ebitda_v > 0:
+            out["ev_ebitda"] = ev / ebitda_v
+        if share_n:
+            out["net_cash_per_share"] = (cash_v - debt_v) / share_n
+    if rev_v:
+        out["ps"] = mcap / rev_v
+    if eq_v:
+        out["pb"] = mcap / eq_v
+    if ni_v and ni_v > 0:
+        out["pe_ttm"] = mcap / ni_v
+    elif ttm_ceps and ttm_ceps > 0:
+        eps_v = _to_valuation(ttm_ceps, inputs, report, val_ccy)
+        if eps_v:
+            out["pe_ttm"] = px / eps_v
+    if fcf_v is not None and mcap:
+        out["fcf_yield"] = fcf_v / mcap * 100
+    return out
+
+
+def _valuation_section(inputs, currency, metrics) -> str:
     price = inputs.price
     info = inputs.yahoo_info
     shares = info.get("sharesOutstanding") or info.get("Shares Outstanding__num")
     close = price.close if price else None
-    px_ccy = (price.currency if price else inputs.currency_price) or "USD"
-    fx = inputs.fx_usd
+    quote = normalize_ccy((price.currency if price else inputs.currency_price) or "USD") or "USD"
+    val_ccy = major_unit(quote)
     lines = ["## 5. Valuation at the point-in-time close",
              "| Metric | Value | Formula / source |",
              "|---|---|---|"]
     if close is None:
         lines.append("| Last close | n/a | |")
         return "\n".join(lines)
-    lines.append(f"| Last close | {px_ccy} {close:.2f} on {price.day} | daily history; do not use the 50-day average as the price |")
-    mcap = None
+    lines.append(
+        f"| Last close | {quote} {close:.2f} on {price.day} | "
+        f"daily history; do not use the 50-day average as the price |"
+    )
+    if quote in _MINOR_TO_MAJOR:
+        major, scale = _MINOR_TO_MAJOR[quote]
+        lines.append(
+            f"| Last close ({major}) | {quote_to_major(close, quote):.4f} {major} | "
+            f"{quote} / {scale:.0f} |"
+        )
     if shares and close:
-        share_n = float(shares)
-        px = close
-        if currency == "JPY" and px_ccy == "USD" and fx:
-            px = close * fx
-        mcap = px * share_n
-        lines.append(f"| Shares outstanding | {share_n / 1e6:,.1f}M | snapshot ⚠ not point-in-time |")
-        mcap_disp = fmt_amount(mcap, currency) if currency == "JPY" else f"${mcap / 1e6:,.0f}M"
-        lines.append(f"| Market cap | {mcap_disp} | price × shares |")
-        ev = None
-        if mcap is not None and total_debt0 is not None and cash0 is not None:
-            ev = mcap + total_debt0 - cash0
-            lines.append(f"| Enterprise value | {fmt_amount(ev, currency)} | mcap + debt − cash+STI |")
-            if ttm_rev:
-                lines.append(f"| EV / revenue TTM | {ev / ttm_rev:.2f}x | |")
-            if ttm_ebitda and ttm_ebitda > 0:
-                lines.append(f"| EV / EBITDA TTM | {ev / ttm_ebitda:.1f}x | |")
-        if ttm_rev and mcap:
-            lines.append(f"| Price / sales TTM | {mcap / ttm_rev:.2f}x | |")
-        if equity0 and mcap:
-            lines.append(f"| Price / book | {mcap / equity0:.2f}x | |")
-        pe = None
-        if ttm_ceps and ttm_ceps > 0 and currency == "JPY" and fx:
-            pe = (close * fx) / ttm_ceps
-        elif ttm_ni and ttm_ni > 0 and mcap:
-            pe = mcap / ttm_nic if ttm_nic and ttm_nic > 0 else mcap / ttm_ni
-        lines.append(f"| P/E TTM | {f'{pe:.1f}x' if pe else 'n/m (negative earnings)'} | continuing when discontinued ≠ 0 |")
-        if ttm_fcf and mcap:
-            lines.append(f"| FCF yield TTM | {ttm_fcf / mcap * 100:.1f}% | |")
+        lines.append(
+            f"| Shares outstanding | {float(shares) / 1e6:,.1f}M | snapshot ⚠ not point-in-time |"
+        )
+    mcap = metrics.get("mcap")
+    if mcap is not None:
+        lines.append(f"| Market cap | {fmt_amount(mcap, val_ccy)} | price × shares ({val_ccy}) |")
+    convertible = (normalize_ccy(currency) or currency) == val_ccy or _fx_report_per_val(inputs) is not None
+    if not convertible:
+        lines.append(
+            "| EV, P/E, P/B, FCF yield | omitted | "
+            "CROSS-CURRENCY: no FX on or before as-of; not mixing currencies |"
+        )
+    else:
+        fx_note = ""
+        if (normalize_ccy(currency) or currency) != val_ccy:
+            rate = _fx_report_per_val(inputs)
+            fx_note = f"; statements {currency} → {val_ccy} at {rate:,.4f}"
+        cash_v = metrics.get("cash_in_price_ccy")
+        if cash_v is not None:
+            lines.append(
+                f"| Cash + STI ({val_ccy}) | {fmt_amount(cash_v, val_ccy)} | "
+                f"as-reported converted{fx_note} |"
+            )
+        if metrics.get("net_cash_per_share") is not None:
+            lines.append(
+                f"| Net cash per share | {metrics['net_cash_per_share']:.2f} {val_ccy} | "
+                f"(cash+STI − debt) / shares{fx_note} |"
+            )
+        if metrics.get("ev") is not None:
+            lines.append(
+                f"| Enterprise value | {fmt_amount(metrics['ev'], val_ccy)} | "
+                f"mcap + debt − cash+STI{fx_note} |"
+            )
+        if metrics.get("ev_sales") is not None:
+            lines.append(f"| EV / sales TTM | {metrics['ev_sales']:.2f}x | |")
+        if metrics.get("ev_ebitda") is not None:
+            lines.append(f"| EV / EBITDA TTM | {metrics['ev_ebitda']:.1f}x | |")
+        if metrics.get("ps") is not None:
+            lines.append(f"| Price / sales TTM | {metrics['ps']:.2f}x | |")
+        if metrics.get("pb") is not None:
+            lines.append(f"| Price / book | {metrics['pb']:.2f}x | |")
+        pe = metrics.get("pe_ttm")
+        lines.append(
+            f"| P/E TTM | {f'{pe:.1f}x' if pe else 'n/m (negative earnings)'} | "
+            f"continuing when discontinued ≠ 0{fx_note} |"
+        )
+        if metrics.get("fcf_yield") is not None:
+            lines.append(f"| FCF yield TTM | {metrics['fcf_yield']:.1f}% | |")
     if price and price.high_52w:
         dist_h = (close / price.high_52w - 1) * 100
         dist_l = (close / price.low_52w - 1) * 100 if price.low_52w else None
@@ -1286,7 +1504,7 @@ def _appendix(inputs, isq, cfq, bsq, isa, cfa, bsa, currency, month, naming,
         for name, vals in extra.items():
             if vals:
                 rows.append((name, [_cell(vals, i, currency, derived=True) for i in range(len(headers))]))
-        parts.append(f"### {title} ({'JPY bn' if currency == 'JPY' else 'USD M'})")
+        parts.append(f"### {title} ({unit_label(currency)})")
         parts.append(_md_table(headers, rows))
     return "\n\n".join(parts) + "\n"
 
@@ -1401,16 +1619,18 @@ def fetch_packet_inputs(ticker: str, as_of: str) -> PacketInputs:
         logger.warning("profile fetch failed for %s: %s", ticker, exc)
 
     quote_type = str(info.get("quoteType") or "EQUITY")
+    price_ccy = quote_currency(ticker, info)
+    report_ccy = normalize_ccy(info.get("financialCurrency")) or ""
     inputs = PacketInputs(
         ticker=ticker, as_of=as_of, name=info.get("longName") or info.get("shortName"),
         quote_type=quote_type, country=info.get("country"),
-        currency_price=info.get("currency") or "USD",
-        currency_report=info.get("financialCurrency") or info.get("currency") or "USD",
+        currency_price=price_ccy,
+        currency_report=report_ccy or "USD",
         yahoo_info=_info_to_map(info),
     )
     if quote_type.upper() in _ETF_TYPES:
         inputs.fund = _fetch_fund(ticker, info)
-        inputs.price = _price_from_history(ticker, as_of, load_ohlcv)
+        inputs.price = _price_from_history(ticker, as_of, load_ohlcv, currency=price_ccy)
         return inputs
 
     for kind in ("balance_sheet", "income_statement", "cashflow"):
@@ -1421,8 +1641,9 @@ def fetch_packet_inputs(ticker: str, as_of: str) -> PacketInputs:
             except (NoMarketDataError, VendorUnavailableError, Exception) as exc:
                 logger.debug("EDGAR %s %s %s: %s", ticker, kind, freq, exc)
                 try:
+                    yahoo_ccy = report_ccy or "USD"
                     table = yahoo.statement_table(
-                        ticker, kind, freq, as_of, currency=inputs.currency_report,
+                        ticker, kind, freq, as_of, currency=yahoo_ccy,
                     )
                 except (NoMarketDataError, VendorUnavailableError, Exception) as exc2:
                     logger.debug("Yahoo %s %s %s: %s", ticker, kind, freq, exc2)
@@ -1432,11 +1653,12 @@ def fetch_packet_inputs(ticker: str, as_of: str) -> PacketInputs:
     if not inputs.statements:
         raise NoMarketDataError(ticker, ticker, "no statements available for fundamentals packet")
 
-    inputs.price = _price_from_history(ticker, as_of, load_ohlcv)
-    if inputs.currency_report == "JPY" and inputs.currency_price == "USD":
-        inputs.fx_usd, inputs.fx_pair = _fx_rate("JPY=X", as_of, load_ohlcv)
+    inputs.currency_report = reporting_currency(inputs)
+    inputs.price = _price_from_history(ticker, as_of, load_ohlcv, currency=inputs.currency_price)
+    _attach_fx(inputs, as_of, load_ohlcv)
+    if ticker.upper() in {"SONY", "SNE"}:
         try:
-            inputs.home_price = _price_from_history("6758.T", as_of, load_ohlcv)
+            inputs.home_price = _price_from_history("6758.T", as_of, load_ohlcv, currency="JPY")
         except Exception:  # noqa: BLE001
             inputs.home_price = None
     try:
@@ -1497,7 +1719,7 @@ def _info_to_map(info: dict) -> dict[str, Any]:
     return out
 
 
-def _price_from_history(ticker: str, as_of: str, load_ohlcv) -> PricePoint | None:
+def _price_from_history(ticker: str, as_of: str, load_ohlcv, currency: str = "USD") -> PricePoint | None:
     try:
         frame = load_ohlcv(ticker, as_of, fill_gaps=False)
     except Exception as exc:  # noqa: BLE001
@@ -1528,7 +1750,7 @@ def _price_from_history(ticker: str, as_of: str, load_ohlcv) -> PricePoint | Non
         day=last["Date"].strftime("%Y-%m-%d"),
         previous=float(prev["Close"]) if prev is not None else None,
         previous_day=prev["Date"].strftime("%Y-%m-%d") if prev is not None else None,
-        currency="USD",
+        currency=normalize_ccy(currency) or currency or "USD",
         high_52w=float(year["High"].max()) if "High" in year.columns and not year.empty else None,
         low_52w=float(year["Low"].min()) if "Low" in year.columns and not year.empty else None,
         ma50=float(window50.mean()) if len(window50) >= 20 else None,
@@ -1538,7 +1760,64 @@ def _price_from_history(ticker: str, as_of: str, load_ohlcv) -> PricePoint | Non
 
 def _fx_rate(symbol: str, as_of: str, load_ohlcv) -> tuple[float | None, str]:
     pt = _price_from_history(symbol, as_of, load_ohlcv)
-    return (pt.close if pt else None), "USD/JPY"
+    return (pt.close if pt else None), symbol
+
+
+def _attach_fx(inputs: PacketInputs, as_of: str, load_ohlcv) -> None:
+    report = reporting_currency(inputs)
+    val_ccy = major_unit(inputs.currency_price)
+    if report == val_ccy:
+        return
+    rate, pair, day, source = _lookup_fx(report, val_ccy, as_of, load_ohlcv)
+    inputs.fx_usd = rate
+    inputs.fx_pair = pair
+    inputs.fx_day = day
+    inputs.fx_source = source
+
+
+def _lookup_fx(
+    report: str, val: str, as_of: str, load_ohlcv,
+) -> tuple[float | None, str | None, str | None, str | None]:
+    """Reporting units per 1 valuation unit, as of ``as_of`` (no look-ahead)."""
+    if report == val:
+        return 1.0, f"{val}/{report}", as_of, "identity"
+
+    def close_of(symbol: str) -> PricePoint | None:
+        try:
+            return _price_from_history(symbol, as_of, load_ohlcv)
+        except Exception:  # noqa: BLE001
+            return None
+
+    # VALREPORT=X (USDCNY=X) is report per val.
+    pt = close_of(f"{val}{report}=X")
+    if pt and pt.close:
+        return pt.close, f"{val}/{report}", pt.day, f"yfinance {val}{report}=X"
+    # REPORTVAL=X (EURUSD=X) is val per report — invert.
+    pt = close_of(f"{report}{val}=X")
+    if pt and pt.close:
+        return 1.0 / pt.close, f"{val}/{report}", pt.day, f"yfinance {report}{val}=X"
+
+    report_per_usd, report_day, report_src = _ccy_per_usd(report, as_of, close_of)
+    val_per_usd, val_day, val_src = _ccy_per_usd(val, as_of, close_of)
+    if report_per_usd and val_per_usd:
+        day = report_day or val_day
+        src = report_src if val == "USD" else (val_src if report == "USD" else f"{report_src}; {val_src}")
+        return report_per_usd / val_per_usd, f"{val}/{report}", day, src
+    return None, None, None, None
+
+
+def _ccy_per_usd(ccy: str, as_of: str, close_of) -> tuple[float | None, str | None, str | None]:
+    if ccy == "USD":
+        return 1.0, as_of, "identity"
+    pt = close_of(f"{ccy}=X")
+    if not pt or not pt.close:
+        pt = close_of(f"USD{ccy}=X" if ccy not in _USD_IS_QUOTE else f"{ccy}USD=X")
+    if not pt or not pt.close:
+        return None, None, None
+    if ccy in _USD_IS_QUOTE:
+        # EUR=X / EURUSD=X: USD per 1 EUR → EUR per USD is the inverse.
+        return 1.0 / pt.close, pt.day, f"yfinance {ccy}=X"
+    return pt.close, pt.day, f"yfinance {ccy}=X"
 
 
 def _fetch_fund(ticker: str, info: dict) -> FundSnapshot:
