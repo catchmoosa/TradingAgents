@@ -51,6 +51,7 @@ def test_as_of_window(start, end, expected):
 DATED_TOOLS = [
     tools.get_stock_data,
     tools.get_fundamentals,
+    tools.get_fundamentals_packet,
     tools.get_balance_sheet,
     tools.get_cashflow,
     tools.get_income_statement,
@@ -71,9 +72,9 @@ def test_trade_date_is_hidden_from_the_model(tool):
 
 INSTRUMENT_TOOLS = [
     tools.get_stock_data, tools.get_indicators, tools.get_verified_market_snapshot,
-    tools.get_fundamentals, tools.get_balance_sheet, tools.get_cashflow,
-    tools.get_income_statement, tools.get_earnings_context, tools.get_news,
-    tools.get_insider_transactions,
+    tools.get_fundamentals, tools.get_fundamentals_packet, tools.get_balance_sheet,
+    tools.get_cashflow, tools.get_income_statement, tools.get_earnings_context,
+    tools.get_news, tools.get_insider_transactions,
 ]
 
 
@@ -109,7 +110,7 @@ def _run(tool, args, module):
             "trade_date": TRADE_DATE,
             "company_of_interest": "NVDA",
         })
-    return routed.call_args.args
+    return None if routed.call_args is None else routed.call_args.args
 
 
 @pytest.mark.unit
@@ -122,6 +123,16 @@ def test_statement_tool_with_omitted_date_uses_the_run_date():
 def test_future_curr_date_from_the_model_is_clamped():
     args = _run(tools.get_fundamentals, {"curr_date": "2026-09-14"}, tools)
     assert args == ("get_fundamentals", "NVDA", TRADE_DATE)
+
+
+@pytest.mark.unit
+def test_packet_curr_date_is_clamped(monkeypatch):
+    seen = []
+    import tradingagents.dataflows.fundamentals_packet as packet_mod
+    monkeypatch.setattr(packet_mod, "render_fundamentals_packet",
+                        lambda ticker, day: seen.append((ticker, day)) or "ok")
+    _run(tools.get_fundamentals_packet, {"curr_date": "2026-09-14"}, tools)
+    assert seen == [("NVDA", TRADE_DATE)]
 
 
 @pytest.mark.unit

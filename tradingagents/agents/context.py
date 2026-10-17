@@ -201,6 +201,18 @@ def report_or_absent(text: str, source: str) -> str:
     return f"(No {source} report in this run: it is not available, not an empty finding.)"
 
 
+def packet_summary_block(state: Mapping[str, Any]) -> str:
+    """Authoritative packet header + key metrics, or empty when the analyst skipped it."""
+    text = (state.get("fundamentals_packet_summary") or "").strip()
+    if not text:
+        return ""
+    return (
+        "Fundamentals packet summary (authoritative figures; quote these, "
+        "do not recompute):\n"
+        f"{text}\n"
+    )
+
+
 def get_portfolio_context_from_state(state: Mapping[str, Any]) -> str:
     """Return the caller's portfolio block, or a notice that none was given.
 

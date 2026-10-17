@@ -116,6 +116,9 @@ def offline(monkeypatch, tmp_path):
     monkeypatch.setattr(sentiment_analyst, "fetch_stocktwits_messages", lambda *a, **k: "no posts")
     monkeypatch.setattr(sentiment_analyst, "fetch_reddit_posts", lambda *a, **k: "no posts")
     monkeypatch.setattr(yahoo_market.yf, "Ticker", lambda s: type("T", (), {"info": {"longName": "NVIDIA"}})())
+    import tradingagents.dataflows.fundamentals_packet as packet_mod
+    monkeypatch.setattr(packet_mod, "render_fundamentals_packet",
+                        lambda *a, **k: called.add("get_fundamentals_packet") or "packet data")
     context._identity.cache_clear()
     return called
 
@@ -140,9 +143,8 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
                 "investment_plan", "trader_investment_plan", "final_trade_decision"):
         assert state[key].strip(), key
     tool_methods = {"get_stock_data", "get_indicators", "get_news", "get_global_news",
-                    "get_macro_indicators", "get_prediction_markets", "get_fundamentals",
-                    "get_balance_sheet", "get_cashflow", "get_income_statement",
-                    "get_earnings_context", "get_insider_transactions", "ohlcv"}
+                    "get_macro_indicators", "get_prediction_markets",
+                    "get_fundamentals_packet", "ohlcv"}
     assert offline == tool_methods
     assert [e["rating"] for e in graph.memory_log.load_entries()] == ["Overweight"]
 
@@ -199,7 +201,7 @@ def test_a_debug_run_prints_the_analysts_work_and_reaches_the_same_decision(tmp_
     assert signal == "Overweight"
     assert state["market_report"].strip() and state["fundamentals_report"].strip()
     printed = capsys.readouterr().out
-    assert "get_stock_data" in printed and "get_balance_sheet" in printed
+    assert "get_stock_data" in printed and "get_fundamentals_packet" in printed
 
 
 @pytest.mark.unit

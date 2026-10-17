@@ -1,0 +1,8 @@
+{
+  "balance_sheet:quarterly": {
+    "Inventory": {"2026-06-30": 1661}
+  },
+  "cashflow:quarterly": {
+    "Share-based Compensation": {"2026-06-30": 433}
+  }
+}

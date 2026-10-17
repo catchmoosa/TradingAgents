@@ -52,6 +52,13 @@ _RATING_LINE_RE = re.compile(
 # A line presenting the scale rather than a decision ("Rating Scale: Buy, ...").
 _RATING_SCALE_RE = re.compile(r"rating\s*(scale|options|legend)", re.IGNORECASE)
 
+# "## Rating" / "## Final Rating" with the rating word on the next line (no colon).
+_RATING_HEADING_RE = re.compile(
+    r"^[\s*_#]*" + _OWN_QUALIFIER + r"rating[\s*_#]*$",
+    re.IGNORECASE,
+)
+_BARE_RATING_RE = re.compile(r"^[\s*_]*(\w+)[\s*_.,]*$", re.IGNORECASE)
+
 def extract_rating(text: str) -> str | None:
     """Extract a 5-tier rating from its label, or ``None`` if there is none.
 
@@ -72,6 +79,17 @@ def extract_rating(text: str) -> str | None:
     # marking which one is the call, are no call (#1170). Lines presenting the
     # scale itself are a legend the model echoed, not a call.
     lines = [line for line in norm.splitlines() if line.strip() and not _RATING_SCALE_RE.search(line)]
+    heading_rating = None
+    for i, line in enumerate(lines[:-1]):
+        if _RATING_HEADING_RE.match(line.strip()):
+            bare = _BARE_RATING_RE.match(lines[i + 1].strip())
+            if bare and bare.group(1).lower() in _RATING_SET:
+                heading_rating = bare.group(1).capitalize()
+                break
+    if heading_rating:
+        # A heading plus a bare rating word is the decision's own call (RIVN "## Rating\nHold").
+        return heading_rating
+
     first = next((line for line in lines if not line.lstrip().startswith("#")
                   or _RATING_LINE_RE.match(line)), "")
     m = _RATING_LINE_RE.match(first)

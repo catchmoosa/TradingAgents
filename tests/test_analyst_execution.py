@@ -18,6 +18,11 @@ class AnalystExecutionPlanTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_analyst_execution_plan(["market", "macro"])
 
+    def test_fundamentals_plan_binds_the_packet_tool_only(self):
+        plan = build_analyst_execution_plan(["fundamentals"])
+        names = [t.name for t in plan.specs[0].tools]
+        self.assertEqual(names, ["get_fundamentals_packet"])
+
     def test_social_key_displays_as_sentiment_analyst(self):
         # The wire key stays "social" for saved-config back-compat, but the
         # user-visible agent_node label must match the v0.2.5 rename so the

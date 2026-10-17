@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,6 +34,11 @@ from tradingagents.dataflows.files import replace_file
 
 logger = logging.getLogger(__name__)
 
+# SEC fair-access: keep a little headroom under 10 requests/second.
+_MIN_REQUEST_INTERVAL = 0.12
+_rate_lock = threading.Lock()
+_last_request_at = 0.0
+
 _TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
@@ -43,6 +49,8 @@ _CACHE_TTL_SECONDS = 24 * 60 * 60
 # Line items, each with the tags filers use for it, best first. First match wins
 # and values are never summed across tags: a company reporting revenue under two
 # tags would otherwise be counted twice.
+# ~50 us-gaap concepts with fallbacks. First match wins; values are never summed
+# across tags. An untagged line is printed as "not tagged".
 _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
     "balance_sheet": [
         ("Total Assets", ("Assets",)),
@@ -54,19 +62,65 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
                                     "AvailableForSaleSecuritiesDebtSecuritiesCurrent",
                                     "DebtSecuritiesCurrent",
                                     "OtherShortTermInvestments")),
+        ("Inventory", ("InventoryNet", "Inventory")),
+        ("Receivables", ("AccountsReceivableNetCurrent", "AccountsReceivableNet",
+                         "ReceivablesNetCurrent")),
+        ("Net PP&E", ("PropertyPlantAndEquipmentNet",)),
+        ("Goodwill", ("Goodwill",)),
+        ("Other Intangibles", ("IntangibleAssetsNetExcludingGoodwill",)),
         ("Total Liabilities", ("Liabilities",)),
         ("Current Liabilities", ("LiabilitiesCurrent",)),
+        ("Accounts Payable", ("AccountsPayableCurrent", "AccountsPayable")),
+        ("Accrued Liabilities", ("AccruedLiabilitiesCurrent", "AccruedLiabilities")),
+        ("Deferred Revenue", ("ContractWithCustomerLiabilityCurrent",
+                              "DeferredRevenueCurrent", "ContractWithCustomerLiability")),
+        ("Current Debt", ("LongTermDebtCurrent", "DebtCurrent",
+                          "ShortTermBorrowings")),
+        ("Long-Term Debt", ("LongTermDebtNoncurrent", "LongTermDebt",
+                            "LongTermDebtAndCapitalLeaseObligations")),
+        ("Debt (carrying value)", ("DebtInstrumentCarryingAmount",)),
+        ("Operating Lease Liabilities (current)", ("OperatingLeaseLiabilityCurrent",)),
+        ("Operating Lease Liabilities (noncurrent)", ("OperatingLeaseLiabilityNoncurrent",)),
         ("Stockholders Equity", ("StockholdersEquity",
                                  "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest")),
+        ("Retained Earnings", ("RetainedEarningsAccumulatedDeficit",)),
+        ("Treasury Stock", ("TreasuryStockValue",)),
+        ("Minority Interest", ("MinorityInterest",
+                               "NoncontrollingInterestInConsolidatedEntity")),
+        # Multi-class filers (NVO A+B, GOOGL A+C, META, BRK) report one fact
+        # per class under the same period; `_as_of_shares` sums them.
+        # Cover-page dei dates are aligned onto statement periods, not columns.
+        ("Shares Outstanding", ("CommonStockSharesOutstanding",
+                                "EntityCommonStockSharesOutstanding")),
+        ("Shares Issued", ("CommonStockSharesIssued",)),
     ],
     "income_statement": [
         ("Revenue", ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues",
                      "SalesRevenueNet")),
         ("Cost of Revenue", ("CostOfRevenue", "CostOfGoodsAndServicesSold")),
         ("Gross Profit", ("GrossProfit",)),
+        ("R&D", ("ResearchAndDevelopmentExpense",)),
+        ("SG&A", ("SellingGeneralAndAdministrativeExpense",)),
+        ("Operating Expenses", ("OperatingExpenses", "CostsAndExpenses")),
         ("Operating Income", ("OperatingIncomeLoss",)),
+        ("Interest Income", ("InvestmentIncomeInterest", "InterestAndDividendIncomeOperating")),
+        ("Interest Expense", ("InterestExpense",)),
+        ("Pretax Income", (
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        )),
+        ("Tax Provision", ("IncomeTaxExpenseBenefit",)),
+        ("Net Income (continuing)", ("IncomeLossFromContinuingOperations",)),
+        ("Net Income (discontinued)", ("IncomeLossFromDiscontinuedOperationsNetOfTax",)),
         ("Net Income", ("NetIncomeLoss",)),
+        ("Minority Interest in Earnings", (
+            "NetIncomeLossAttributableToNoncontrollingInterest",
+        )),
         ("Diluted EPS", ("EarningsPerShareDiluted",)),
+        ("Basic EPS", ("EarningsPerShareBasic",)),
+        ("Diluted Average Shares", ("WeightedAverageNumberOfDilutedSharesOutstanding",
+                                    "WeightedAverageNumberOfShareOutstandingChangeNumberOfSharesDiluted")),
+        ("Basic Average Shares", ("WeightedAverageNumberOfSharesOutstandingBasic",)),
     ],
     "cashflow": [
         ("Operating Cash Flow", ("NetCashProvidedByUsedInOperatingActivities",
@@ -75,6 +129,31 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("Financing Cash Flow", ("NetCashProvidedByUsedInFinancingActivities",)),
         ("Capital Expenditure", ("PaymentsToAcquirePropertyPlantAndEquipment",
                                  "PaymentsToAcquireProductiveAssets")),
+        ("Depreciation and Amortization", ("DepreciationDepletionAndAmortization",
+                                           "DepreciationAndAmortization")),
+        ("Share-based Compensation", ("ShareBasedCompensation",)),
+        ("Change in Inventory", ("IncreaseDecreaseInInventories",)),
+        ("Change in Receivables", ("IncreaseDecreaseInAccountsReceivable",)),
+        ("Change in Payables", ("IncreaseDecreaseInAccountsPayable",
+                                "IncreaseDecreaseInAccountsPayableTrade")),
+        ("Acquisitions", ("PaymentsToAcquireBusinessesNetOfCashAcquired",
+                          "PaymentsToAcquireBusinessesAndInterestInAffiliates")),
+        ("Divestitures", ("ProceedsFromDivestitureOfBusinessesNetOfCashDivested",
+                          "ProceedsFromDivestitureOfBusinesses")),
+        ("Purchases of Investments", ("PaymentsToAcquireInvestments",
+                                      "PaymentsToAcquireMarketableSecurities")),
+        ("Sales of Investments", ("ProceedsFromSaleMaturityAndCollectionsOfInvestments",
+                                  "ProceedsFromSaleAndMaturityOfMarketableSecurities",
+                                  "ProceedsFromSaleOfAvailableForSaleSecurities")),
+        ("Debt Issuance", ("ProceedsFromIssuanceOfLongTermDebt",
+                           "ProceedsFromIssuanceOfDebt")),
+        ("Debt Repayment", ("RepaymentsOfLongTermDebt", "RepaymentsOfDebt")),
+        ("Equity Issuance", ("ProceedsFromIssuanceOfCommonStock",
+                             "ProceedsFromIssuanceOrSaleOfEquity")),
+        ("Buybacks", ("PaymentsForRepurchaseOfCommonStock",)),
+        ("Dividends Paid", ("PaymentsOfDividends", "PaymentsOfDividendsCommonStock")),
+        ("Foreign Exchange Effect", ("EffectOfExchangeRateOnCashAndCashEquivalents",)),
+        ("Ending Cash", ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",)),
     ],
 }
 
@@ -93,6 +172,9 @@ _YEAR_TO_DATE = ((150, 200, 6), (240, 290, 9))
 # check, so either would read as a fiscal year. The value is still the latest
 # filing of any form: a recast after a split or spin-off counts from its filing.
 _ANNUAL_FORMS = ("10-K", "20-F", "40-F")
+# Cover-page share facts (dei EntityCommonStockSharesOutstanding) often end on
+# a date after the balance-sheet instant. They must not enter period selection.
+_SHARE_PERIOD_LABELS = frozenset({"Shares Outstanding", "Shares Issued"})
 
 # A 10-Q table back to 2018 is ~28 columns, oldest first, and the model then
 # misreads which period is which. Keep a short, latest-first window.
@@ -102,6 +184,7 @@ _RECENT_YEARS = 4
 # nothing recent to offer, so the router should try the next vendor.
 _STALE_AFTER = timedelta(days=456)
 _BLANK = "not filed"
+_NOT_TAGGED = "not tagged"
 _YOY_ROWS = ("Revenue", "Net Income")
 _COMBINED_CASH_TAGS = ("CashCashEquivalentsAndShortTermInvestments",)
 
@@ -119,11 +202,19 @@ def _user_agent() -> str:
     return configured or f"TradingAgents/{__version__} (contact@example.com)"
 
 
+def _throttle() -> None:
+    global _last_request_at
+    with _rate_lock:
+        wait = _MIN_REQUEST_INTERVAL - (time.time() - _last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.time()
 
 
 def _fetch_json(url: str) -> dict:
     """Read a public EDGAR document, respecting SEC's identification rule."""
     try:
+        _throttle()
         response = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=30)
         response.raise_for_status()
         return response.json()
@@ -136,6 +227,19 @@ def _fetch_json(url: str) -> dict:
         raise VendorUnavailableError("SEC EDGAR returned an unreadable response") from exc
 
 
+def _fetch_text(url: str) -> str:
+    """Read a public EDGAR document as text (8-K body / complete submission)."""
+    try:
+        _throttle()
+        response = requests.get(url, headers={"User-Agent": _user_agent()}, timeout=30)
+        response.raise_for_status()
+        response.encoding = response.encoding or "utf-8"
+        return response.text
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        raise VendorUnavailableError(f"SEC EDGAR request failed ({status or type(exc).__name__})") from exc
+
+
 def _cached_json(url: str, name: str) -> dict:
     path = Path(get_config()["data_cache_dir"]) / "sec_edgar" / name
     if path.exists() and time.time() - path.stat().st_mtime < _CACHE_TTL_SECONDS:
@@ -146,6 +250,16 @@ def _cached_json(url: str, name: str) -> dict:
     data = _fetch_json(url)
     path.parent.mkdir(parents=True, exist_ok=True)
     replace_file(path, lambda temp: Path(temp).write_text(json.dumps(data), encoding="utf-8"))
+    return data
+
+
+def _cached_text(url: str, name: str) -> str:
+    path = Path(get_config()["data_cache_dir"]) / "sec_edgar" / name
+    if path.exists() and time.time() - path.stat().st_mtime < _CACHE_TTL_SECONDS:
+        return path.read_text(encoding="utf-8", errors="replace")
+    data = _fetch_text(url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    replace_file(path, lambda temp: Path(temp).write_text(data, encoding="utf-8"))
     return data
 
 
@@ -209,6 +323,131 @@ def _as_of(facts: dict, tags: tuple[str, ...], as_of_date: str, spans: tuple[tup
     return dict(sorted(values.items())), chosen_unit, meta
 
 
+def _share_class_total(vals: list[float]) -> float:
+    """One period's share count: sum distinct classes, not a class plus the total.
+
+    Filers put each class in its own XBRL context, so two facts on the same
+    date are A shares and B shares, not a restatement. If the largest fact
+    already equals the sum of the others it is the total and the rest are
+    the breakdown — keep the total so we do not double-count.
+    """
+    unique: list[float] = []
+    for value in vals:
+        if not any(abs(value - seen) <= max(1.0, 0.001 * abs(seen)) for seen in unique):
+            unique.append(value)
+    if not unique:
+        return 0.0
+    if len(unique) == 1:
+        return unique[0]
+    largest = max(unique)
+    rest = sum(unique) - largest
+    if rest > 0 and abs(largest - rest) / largest <= 0.05:
+        return largest
+    return sum(unique)
+
+
+def _as_of_shares(namespaces: dict, tags: tuple[str, ...], as_of_date: str,
+                  spans: tuple[tuple[int, int], ...],
+                  forms: tuple[str, ...] = ()) -> tuple[dict, str, dict]:
+    """Share count per period, summing classes in the same filing vintage.
+
+    ``dei:EntityCommonStockSharesOutstanding`` (and the us-gaap twin) repeats
+    once per class. Ordinary `_as_of` would keep one class. Facts are taken
+    from both ``dei`` and ``us-gaap``; the latest filing on or before the
+    date wins, then classes in that vintage are summed.
+
+    Cover-page dei facts can end after the balance-sheet date. ``_collect``
+    keeps those dates out of the statement columns and parks the count on
+    the latest statement period they follow.
+    """
+    groups: dict[tuple[str, int, str], dict] = {}
+    for ns in ("dei", "us-gaap"):
+        facts = namespaces.get(ns) or {}
+        for tag in tags:
+            for unit, unit_values in ((facts.get(tag) or {}).get("units") or {}).items():
+                if unit and "share" not in str(unit).lower():
+                    continue
+                for fact in unit_values:
+                    index = _span_index(fact, spans)
+                    if fact["filed"] > as_of_date or index is None:
+                        continue
+                    form = str(fact.get("form") or "")
+                    if forms and not form.startswith(forms):
+                        continue
+                    key = (fact["end"], index, fact["filed"])
+                    slot = groups.get(key)
+                    if slot is None:
+                        slot = {
+                            "vals": [],
+                            "unit": unit or "shares",
+                            "fy": fact.get("fy"),
+                            "fp": fact.get("fp"),
+                            "form": form,
+                        }
+                        groups[key] = slot
+                    slot["vals"].append(float(fact["val"]))
+                    if fact.get("fy") is not None:
+                        slot["fy"] = fact.get("fy")
+                    if fact.get("fp"):
+                        slot["fp"] = fact.get("fp")
+                    if form:
+                        slot["form"] = form
+    values: dict[tuple[str, int], float] = {}
+    units: dict[tuple[str, int], str] = {}
+    meta: dict[tuple[str, int], dict] = {}
+    latest_filed: dict[tuple[str, int], str] = {}
+    for (end, index, filed), slot in groups.items():
+        period = (end, index)
+        seen = latest_filed.get(period)
+        if seen is not None and filed < seen:
+            continue
+        if seen == filed and period in values:
+            merged = _share_class_total([values[period], *slot["vals"]])
+            values[period] = merged
+            continue
+        latest_filed[period] = filed
+        values[period] = _share_class_total(slot["vals"])
+        units[period] = slot["unit"]
+        meta[period] = {"fy": slot["fy"], "fp": slot["fp"], "form": slot["form"]}
+    chosen_unit = units[max(units)] if units else "shares"
+    return dict(sorted(values.items())), chosen_unit, meta
+
+
+def _align_cover_share_facts(
+    values: dict[tuple[str, int], float],
+    meta: dict[tuple[str, int], dict],
+    periods: list[tuple[str, int]],
+) -> tuple[dict[tuple[str, int], float], dict[tuple[str, int], dict]]:
+    """Map cover-page share dates onto statement period-ends.
+
+    A 10-Q cover page often reports shares as of ~the filing week (AMZN
+    2026-07-22) while the balance sheet is the quarter-end (2026-06-30).
+    Exact period-end facts stay put; a later cover date fills the latest
+    statement period on or before it when that cell is empty, or when the
+    cover total is substantially larger (omitted share class).
+    """
+    period_set = set(periods)
+    aligned: dict[tuple[str, int], float] = {}
+    aligned_meta: dict[tuple[str, int], dict] = {}
+    leftover: list[tuple[tuple[str, int], float]] = []
+    for key, val in values.items():
+        if key in period_set:
+            aligned[key] = val
+            if key in meta:
+                aligned_meta[key] = meta[key]
+        else:
+            leftover.append((key, val))
+    for (end, index), val in leftover:
+        candidates = [p for p in periods if p[1] == index and p[0] <= end]
+        if not candidates:
+            continue
+        target = max(candidates)
+        existing = aligned.get(target)
+        if existing is None or val > existing * 1.15:
+            aligned[target] = val
+    return aligned, aligned_meta
+
+
 def _fiscal_year(value) -> int | None:
     try:
         return int(value)
@@ -245,7 +484,7 @@ def _format_value(value, unit: str) -> str:
 
 def _header_unit(lines: dict[str, tuple[dict, str]]) -> str:
     for values, unit in lines.values():
-        if values and unit and "/" not in unit:
+        if values and unit and "/" not in unit and "share" not in unit.lower():
             return unit
     return "USD"
 
@@ -325,7 +564,8 @@ def _prior_year_value(end: str, index: int, values: dict, meta: dict):
                 continue
             if (_fiscal_year(prior_info.get("fy")) == fy - 1
                     and str(prior_info.get("fp") or "").upper() == want_fp
-                    and (prior_end, prior_index) in values):
+                    and (prior_end, prior_index) in values
+                    and _year_apart(end, prior_end)):
                 return prior_end, values[(prior_end, prior_index)]
     try:
         target = date.fromisoformat(end).replace(year=date.fromisoformat(end).year - 1)
@@ -344,6 +584,15 @@ def _prior_year_value(end: str, index: int, values: dict, meta: dict):
     if best:
         return best[1], values[(best[1], index)]
     return None
+
+
+def _year_apart(end: str, prior_end: str, slop: int = 50) -> bool:
+    """YoY only compares periods about one year apart, not a fy label alone."""
+    try:
+        delta = (date.fromisoformat(end) - date.fromisoformat(prior_end)).days
+    except ValueError:
+        return False
+    return 365 - slop <= delta <= 366 + slop
 
 
 def _combined_cash_row(us_gaap: dict, as_of_date: str, spans, forms, lines, chosen, periods) -> str:
@@ -368,7 +617,7 @@ def _combined_cash_row(us_gaap: dict, as_of_date: str, spans, forms, lines, chos
     return ",".join(["Cash and Short-Term Investments"] + cells)
 
 
-def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -> str:
+def _load_facts(ticker: str, as_of_date: str) -> tuple[str, dict, dict]:
     as_of_date = as_of_date or datetime.now().strftime("%Y-%m-%d")
     cik = cik_for(ticker)
     if cik is None:
@@ -382,7 +631,10 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         if "ifrs-full" in namespaces:
             detail += " (IFRS facts only; falling through)"
         raise NoMarketDataError(ticker, ticker, detail)
+    return as_of_date, us_gaap, namespaces
 
+
+def _span_setup(freq: str):
     quarterly = freq.lower() == "quarterly"
     if quarterly:
         spans = (_SPANS["quarterly"], *((low, high) for low, high, _ in _YEAR_TO_DATE))
@@ -390,17 +642,31 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     else:
         spans, names = (_SPANS["annual"],), [""]
     forms = () if quarterly else _ANNUAL_FORMS
+    return quarterly, spans, names, forms
+
+
+def _collect(kind: str, ticker: str, freq: str, as_of_date: str, title: str):
+    as_of_date, us_gaap, namespaces = _load_facts(ticker, as_of_date)
+    quarterly, spans, names, forms = _span_setup(freq)
     lines: dict[str, tuple[dict, str]] = {}
     metas: dict[str, dict] = {}
     for label, tags in _STATEMENTS[kind]:
-        values, unit, meta = _as_of(us_gaap, tags, as_of_date, spans, forms)
+        if label == "Shares Outstanding":
+            values, unit, meta = _as_of_shares(
+                namespaces, tags, as_of_date, spans, forms,
+            )
+        else:
+            values, unit, meta = _as_of(us_gaap, tags, as_of_date, spans, forms)
         lines[label] = (values, unit)
         metas[label] = meta
     # Each row takes the shortest span it reports for a period, and a column
     # holds one span of one period, so a row filed only to date keeps its figure
-    # beside a row filed by quarter.
+    # beside a row filed by quarter. Share rows are cover-page capable and
+    # must not introduce their own period-ends (AMZN 2026-07-22 vs 2026-06-30).
     chosen = {label: {} for label in lines}
     for label, (values, _) in lines.items():
+        if label in _SHARE_PERIOD_LABELS:
+            continue
         for end, index in values:
             chosen[label][end] = min(index, chosen[label].get(end, index))
     periods = sorted({(end, index) for spans_of in chosen.values() for end, index in spans_of.items()})
@@ -418,6 +684,22 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         raise NoMarketDataError(ticker, ticker, f"no {freq} {title.lower()} filed by {as_of_date}")
 
     periods = _limit_periods(periods, quarterly)
+    for label in _SHARE_PERIOD_LABELS:
+        if label not in lines:
+            continue
+        values, unit = lines[label]
+        aligned, aligned_meta = _align_cover_share_facts(values, metas[label], periods)
+        lines[label] = (aligned, unit)
+        metas[label] = aligned_meta
+        for end, index in aligned:
+            chosen[label][end] = min(index, chosen[label].get(end, index))
+    return as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods
+
+
+def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -> str:
+    as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods = _collect(
+        kind, ticker, freq, as_of_date, title,
+    )
     unit = _header_unit(lines)
     header = (
         f"# {title} for {ticker.upper()} ({freq}), {unit} in millions unless the row says otherwise\n"
@@ -430,7 +712,7 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
     for label, (values, row_unit) in lines.items():
         # Every row spans the same columns, or a reader lines the table up wrong.
         if not values:
-            rows.append(",".join([label] + ["unavailable (not tagged by this filer)"] * len(periods)))
+            rows.append(",".join([label] + [_NOT_TAGGED] * len(periods)))
             continue
         name = label if row_unit == "USD" else f"{label} ({row_unit})"
         # Plain numbers: a thousands separator would split the CSV field.
@@ -441,6 +723,62 @@ def _statement(kind: str, ticker: str, freq: str, as_of_date: str, title: str) -
         rows.append(_combined_cash_row(us_gaap, as_of_date, spans, forms, lines, chosen, periods))
     body = header + "\n".join(rows) + "\n"
     return body + _yoy_block(lines, metas, chosen, periods, names)
+
+
+def statement_table(kind: str, ticker: str, freq: str, as_of_date: str | None = None):
+    """Structured statement (native units) for the fundamentals packet."""
+    from tradingagents.dataflows.statement_tables import PeriodCol, StatementTable
+
+    title = {"balance_sheet": "Balance Sheet", "income_statement": "Income Statement",
+             "cashflow": "Cash Flow Statement"}[kind]
+    as_of_date, us_gaap, quarterly, spans, names, forms, lines, metas, chosen, periods = _collect(
+        kind, ticker, freq, as_of_date, title,
+    )
+    currency = _header_unit(lines)
+    instant = kind == "balance_sheet"
+    columns = []
+    for end, index in periods:
+        info = _info_for(end, index, metas)
+        if instant:
+            span_months = 0
+        elif not quarterly:
+            span_months = 12
+        else:
+            span_months = 3 if index == 0 else (6 if index == 1 else 9 if index == 2 else 12)
+        fp = str(info.get("fp") or "").upper() or ("FY" if not quarterly else None)
+        columns.append(PeriodCol(
+            end=end, fy=_fiscal_year(info.get("fy")), fp=fp or None,
+            span_months=span_months, filed=None, form=info.get("form") or None,
+            source_label=_column_label(end, index, names, info),
+        ))
+    rows: dict[str, list[float | None]] = {}
+    unscaled: set[str] = set()
+    for label, (values, unit) in lines.items():
+        rows[label] = [_value_at(values, chosen[label], end, index) for end, index in periods]
+        if not unit or "/" in unit or "share" in unit.lower():
+            unscaled.add(label)
+    if kind == "balance_sheet":
+        tagged, _unit, _meta = _as_of(us_gaap, _COMBINED_CASH_TAGS, as_of_date, spans, forms)
+        cash_vals, _cash_unit = lines["Cash and Equivalents"]
+        sti_vals, _ = lines["Short-Term Investments"]
+        cells = []
+        for end, index in periods:
+            tagged_val = tagged.get((end, index))
+            cash = _value_at(cash_vals, chosen["Cash and Equivalents"], end, index)
+            sti = _value_at(sti_vals, chosen["Short-Term Investments"], end, index)
+            if tagged_val is not None:
+                cells.append(tagged_val)
+            elif cash is not None and sti is not None:
+                cells.append(cash + sti)
+            elif cash is not None and not sti_vals:
+                cells.append(cash)
+            else:
+                cells.append(None)
+        rows["Cash and Short-Term Investments"] = cells
+    return StatementTable(
+        kind=kind, freq=freq.lower(), source="edgar", currency=currency,
+        scale=1.0, columns=columns, rows=rows, unscaled_rows=unscaled,
+    )
 
 
 def get_balance_sheet(ticker: str, freq: str = "quarterly", as_of_date: str | None = None) -> str:

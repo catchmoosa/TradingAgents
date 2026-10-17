@@ -46,6 +46,17 @@ ANALYST_NODE_SPECS: dict[str, AnalystNodeSpec] = {
 }
 
 
+def _resolve_tools(spec: AnalystNodeSpec) -> AnalystNodeSpec:
+    if spec.key != "fundamentals":
+        return spec
+    return AnalystNodeSpec(
+        key=spec.key,
+        agent_node=spec.agent_node,
+        report_key=spec.report_key,
+        tools=fundamentals_analyst.tools_for_run(),
+    )
+
+
 def build_analyst_execution_plan(
     selected_analysts: Iterable[str],
 ) -> AnalystExecutionPlan:
@@ -54,7 +65,7 @@ def build_analyst_execution_plan(
         spec = ANALYST_NODE_SPECS.get(analyst_key)
         if spec is None:
             raise ValueError(f"unknown analyst key: {analyst_key}")
-        specs.append(spec)
+        specs.append(_resolve_tools(spec))
 
     if not specs:
         raise ValueError("at least one analyst must be selected")

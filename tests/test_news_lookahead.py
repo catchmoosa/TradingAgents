@@ -339,10 +339,25 @@ def test_global_news_does_not_infer_coverage_from_a_stale_search_hit(monkeypatch
 def test_coverage_gap_future_window_is_unavailable():
     from datetime import timedelta
 
-    from tradingagents.dataflows.date_window import coverage_gap
-    today = datetime.now(UTC).date()
+    from tradingagents.dataflows.date_window import coverage_gap, get_current_date
+    today = datetime.strptime(get_current_date(), "%Y-%m-%d").date()
     out = coverage_gap([], str(today), str(today + timedelta(days=3)), "Feed", "items")
     assert out is not None and "past today" in out
+
+
+@pytest.mark.unit
+def test_coverage_gap_today_is_local_not_utc(monkeypatch):
+    """US evening of Oct 16: UTC is already Oct 17. 'Now' must stay local."""
+    from zoneinfo import ZoneInfo
+
+    from tradingagents.dataflows import date_window
+
+    monkeypatch.setattr(
+        date_window, "now_datetime",
+        lambda: datetime(2026, 10, 16, 21, 0, tzinfo=ZoneInfo("America/Los_Angeles")),
+    )
+    out = date_window.coverage_gap([], "2026-10-16", "2026-10-16", "Reddit", "discussion")
+    assert out is None
 
 
 @pytest.mark.unit

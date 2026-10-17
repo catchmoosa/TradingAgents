@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 
 
 def to_utc(dt: datetime) -> datetime:
@@ -31,9 +31,28 @@ def in_window(pub_dt: datetime | None, start_dt: datetime, end_dt: datetime) -> 
     return end >= datetime.now(UTC) - timedelta(days=1)
 
 
+def _configured_tz() -> tzinfo | None:
+    """Timezone for 'now' / today. None means the process local zone."""
+    try:
+        from tradingagents.dataflows.config import get_config
+        name = get_config().get("now_timezone")
+    except Exception:
+        name = None
+    if not name:
+        return None
+    from zoneinfo import ZoneInfo
+    return ZoneInfo(str(name))
+
+
+def now_datetime() -> datetime:
+    """'Now' in the configured timezone (default: local), never UTC-as-today."""
+    tz = _configured_tz()
+    return datetime.now(tz) if tz is not None else datetime.now().astimezone()
+
+
 def get_current_date() -> str:
-    """Today's date, YYYY-MM-DD."""
-    return date.today().strftime("%Y-%m-%d")
+    """Today's date, YYYY-MM-DD, in the configured/local timezone."""
+    return now_datetime().date().strftime("%Y-%m-%d")
 
 
 def is_historical(run_date) -> bool:
@@ -57,11 +76,18 @@ def coverage_gap(
     returned newest-first and unbroken in time; a merged or relevance-ranked
     result passes no dates, leaving only the present as the bound.
     """
-    now = datetime.now(UTC)
-    oldest = min((to_utc(d) for d in dates if d is not None), default=now)
-    if datetime.strptime(end_date, "%Y-%m-%d").date() > now.date():
+    today = now_datetime().date()
+    tz = _configured_tz() or now_datetime().tzinfo
+    dated = []
+    for item in dates:
+        if item is None:
+            continue
+        dt = to_utc(item)
+        dated.append(dt.astimezone(tz).date() if tz is not None else dt.date())
+    oldest = min(dated, default=today)
+    if datetime.strptime(end_date, "%Y-%m-%d").date() > today:
         reason = "the window extends past today"
-    elif oldest.date() > datetime.strptime(start_date, "%Y-%m-%d").date():
+    elif oldest > datetime.strptime(start_date, "%Y-%m-%d").date():
         reason = "it only serves recent items"
     else:
         return None

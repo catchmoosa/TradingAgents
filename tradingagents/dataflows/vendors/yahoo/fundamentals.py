@@ -107,8 +107,8 @@ def get_fundamentals(
     return f"# Company Fundamentals for {canonical}\n\n" + "\n".join(lines)
 
 
-def _statement(ticker, freq, as_of_date, title, quarterly_attr, annual_attr) -> str:
-    """One financial statement as CSV, for a run dated today."""
+def _statement_frame(ticker, freq, as_of_date, title, quarterly_attr, annual_attr):
+    """One financial statement as a DataFrame, for a run dated today."""
     canonical = normalize_symbol(ticker)
     withheld = withhold_undated_statements(as_of_date, canonical, title)
     if withheld:
@@ -118,7 +118,36 @@ def _statement(ticker, freq, as_of_date, title, quarterly_attr, annual_attr) -> 
     data = yf_retry(lambda: getattr(yf.Ticker(canonical), attr))
     if data is None or data.empty:
         raise_for_empty(ticker, canonical, f"{what} data")
+    return data
+
+
+def _statement(ticker, freq, as_of_date, title, quarterly_attr, annual_attr) -> str:
+    """One financial statement as CSV, for a run dated today."""
+    data = _statement_frame(ticker, freq, as_of_date, title, quarterly_attr, annual_attr)
+    if isinstance(data, str):
+        return data
+    canonical = normalize_symbol(ticker)
     return f"# {title} data for {canonical} ({freq})\n" + data.to_csv()
+
+
+_KIND_ATTRS = {
+    "balance_sheet": ("Balance Sheet", "quarterly_balance_sheet", "balance_sheet"),
+    "cashflow": ("Cash Flow", "quarterly_cashflow", "cashflow"),
+    "income_statement": ("Income Statement", "quarterly_income_stmt", "income_stmt"),
+}
+
+
+def statement_table(ticker: str, kind: str, freq: str = "quarterly",
+                    as_of_date: str | None = None, currency: str = "USD"):
+    """Structured Yahoo statement for the fundamentals packet."""
+    from tradingagents.dataflows.statement_tables import from_yahoo_dataframe
+
+    title, quarterly_attr, annual_attr = _KIND_ATTRS[kind]
+    data = _statement_frame(ticker, freq, as_of_date, title, quarterly_attr, annual_attr)
+    if isinstance(data, str):
+        from tradingagents.dataflows.errors import NoMarketDataError
+        raise NoMarketDataError(ticker, normalize_symbol(ticker), "statements withheld for this date")
+    return from_yahoo_dataframe(data, kind, freq.lower(), currency)
 
 
 def get_balance_sheet(

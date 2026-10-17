@@ -28,6 +28,18 @@ def test_the_labelled_rating_wins_whatever_separates_it(separator):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("text, expected", [
+    ("## Rating\nHold\n\nTrim the position.", "Hold"),
+    ("## Rating\nBuy", "Buy"),
+    ("## Final Rating\n**Underweight**\n\nWe wait.", "Underweight"),
+    ("## Our rating\nSell", "Sell"),
+])
+def test_a_rating_heading_with_the_word_on_the_next_line_is_the_call(text, expected):
+    """RIVN-style '## Rating' then a bare word was previously read as REVIEW."""
+    assert extract_rating(text) == expected
+
+
+@pytest.mark.unit
 def test_a_rating_argued_against_is_not_read_as_the_decision():
     assert extract_rating(INVERTED) == "Underweight"
 
