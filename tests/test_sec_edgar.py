@@ -504,3 +504,59 @@ def test_stale_edgar_facts_let_the_configured_next_vendor_serve(monkeypatch):
         out = router.route_to_vendor("get_balance_sheet", "SONY", "quarterly", "2026-10-16")
     assert "yfinance" in out
     assert "USD in millions" not in out
+
+
+NVO_MAP = {"0": {"cik_str": 353278, "ticker": "NVO", "title": "Novo Nordisk A/S"}}
+
+
+def _nvo_share_facts(share_vals, *, also_total=False):
+    """Two-class (A+B) EntityCommonStockSharesOutstanding, NVO-shaped."""
+    filed, form = "2026-02-05", "20-F"
+    end = "2025-12-31"
+    shares = [_fact(end, val, filed, form=form, fp="FY", fy=2025) for val in share_vals]
+    if also_total:
+        shares.insert(0, _fact(end, sum(share_vals), filed, form=form, fp="FY", fy=2025))
+    return {
+        "facts": {
+            "us-gaap": {
+                "Assets": {"units": {"DKK": [
+                    _fact(end, 465_000_000_000, filed, form=form, fp="FY", fy=2025),
+                ]}},
+            },
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {"units": {"shares": shares}},
+            },
+        },
+    }
+
+
+@pytest.mark.unit
+def test_multi_class_shares_outstanding_are_summed(monkeypatch):
+    """NVO-like: A shares + B shares in the same 20-F, not B alone."""
+    a_shares, b_shares = 1_087_000_000, 3_338_000_000
+    _patch_filer(monkeypatch, NVO_MAP, _nvo_share_facts([a_shares, b_shares]))
+    out = sec_edgar.get_balance_sheet("NVO", "annual", "2026-10-17")
+    row = next(
+        cells for name, cells in _rows(out).items() if name.startswith("Shares Outstanding")
+    )
+    assert row[0] == "4425"
+    table = sec_edgar.statement_table("balance_sheet", "NVO", "annual", "2026-10-17")
+    native = table.rows["Shares Outstanding"][0]
+    assert native == pytest.approx(4_425_000_000)
+
+
+@pytest.mark.unit
+def test_share_class_facts_are_not_double_counted_with_a_total(monkeypatch):
+    a_shares, b_shares = 1_087_000_000, 3_338_000_000
+    _patch_filer(monkeypatch, NVO_MAP, _nvo_share_facts([a_shares, b_shares], also_total=True))
+    table = sec_edgar.statement_table("balance_sheet", "NVO", "annual", "2026-10-17")
+    assert table.rows["Shares Outstanding"][0] == pytest.approx(4_425_000_000)
+
+
+@pytest.mark.unit
+def test_share_class_total_keeps_a_single_class():
+    assert sec_edgar._share_class_total([3_338_000_000]) == 3_338_000_000
+    assert sec_edgar._share_class_total([1_087_000_000, 3_338_000_000]) == 4_425_000_000
+    assert sec_edgar._share_class_total(
+        [4_425_000_000, 1_087_000_000, 3_338_000_000]
+    ) == 4_425_000_000

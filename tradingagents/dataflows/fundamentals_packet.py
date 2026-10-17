@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 _ETF_TYPES = {"ETF", "MUTUALFUND"}
 _CONFLICT_TOL = 0.02
+_MCAP_SHARE_TOL = 0.15
 _ADR_RATIO = {"SONY": 1, "SNE": 1}
 
 # Yahoo rows that are duplicates, vendor-computed, or over-granular (SONY coverage).
@@ -934,6 +935,10 @@ def _quality_flags(inputs, isq, cfq, bsq, ttm_fcf, ttm_ni, ttm_nic, pretax, ocf)
             "NOT POINT-IN-TIME: shares outstanding, beta, forward EPS and 52-week range "
             "from a current Yahoo snapshot are flagged; the last close is from daily history."
         )
+    shares, share_src = _resolve_share_count(inputs)
+    share_flag = _share_count_flag(inputs, shares, share_src)
+    if share_flag:
+        flags.append(share_flag)
     return flags
 
 
@@ -1253,21 +1258,128 @@ def _fx_used_text(inputs: PacketInputs, report: str, val_ccy: str) -> str:
     return f"FX used: 1 {val_ccy} = {rate:,.4f} {report} on {day} ({source})"
 
 
-def _valuation_figures(inputs, report, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
-                       cash0, total_debt0, equity0, ttm_ceps) -> dict[str, float | None]:
-    price = inputs.price
+def _yahoo_market_cap(info: dict) -> float | None:
+    return _maybe_float(
+        info.get("Market Cap__num") or info.get("Market Cap") or info.get("marketCap")
+    )
+
+
+def _as_share_count(value) -> float | None:
+    number = _maybe_float(value)
+    if number is None or number <= 0:
+        return None
+    # Statement rows sometimes store millions; Yahoo / EDGAR native counts do not.
+    return number if number > 1e4 else number * 1e6
+
+
+def _statement_share_count(inputs: PacketInputs) -> float | None:
+    for key in ("balance_sheet:quarterly", "balance_sheet:annual"):
+        table = inputs.statements.get(key)
+        if table is None:
+            continue
+        row = lookup_row(table, "Shares Outstanding")
+        if not row:
+            continue
+        for value in row:
+            count = _as_share_count(value)
+            if count:
+                return count
+    return None
+
+
+def _implied_share_count(inputs: PacketInputs) -> float | None:
     info = inputs.yahoo_info
-    shares = info.get("sharesOutstanding") or info.get("Shares Outstanding__num")
+    from_info = _as_share_count(
+        info.get("impliedSharesOutstanding") or info.get("impliedSharesOutstanding__num")
+    )
+    mcap = _yahoo_market_cap(info)
+    price = inputs.price
+    if mcap and price and price.close:
+        px = quote_to_major(price.close, price.currency)
+        if px:
+            return mcap / px
+    return from_info
+
+
+def _resolve_share_count(inputs: PacketInputs) -> tuple[float | None, str]:
+    """Total shares for market cap: sum of classes, not one class.
+
+    Yahoo ``sharesOutstanding`` and a single EDGAR context often omit a class
+    (NVO A vs B). Prefer a statement total that agrees with Yahoo market cap,
+    else implied shares = Yahoo market cap / last close.
+    """
+    info = inputs.yahoo_info
+    yahoo = _as_share_count(info.get("sharesOutstanding") or info.get("Shares Outstanding__num"))
+    stmt = _statement_share_count(inputs)
+    implied = _implied_share_count(inputs)
+    if implied:
+        for candidate, source in (
+            (stmt, "statement class total"),
+            (yahoo, "yahoo sharesOutstanding"),
+        ):
+            if candidate and abs(candidate - implied) / implied <= _MCAP_SHARE_TOL:
+                return candidate, source
+        return implied, "Yahoo market cap / last close"
+    if stmt and yahoo:
+        chosen = stmt if stmt >= yahoo else yahoo
+        return chosen, "statement class total" if chosen == stmt else "yahoo sharesOutstanding"
+    if stmt:
+        return stmt, "statement class total"
+    if yahoo:
+        return yahoo, "yahoo sharesOutstanding"
+    return None, ""
+
+
+def _share_count_flag(inputs: PacketInputs, shares: float | None, source: str) -> str | None:
+    """Flag when price × shares and Yahoo market cap disagree by more than 15%."""
+    yahoo_mcap = _yahoo_market_cap(inputs.yahoo_info)
+    price = inputs.price
+    if not yahoo_mcap or not price or not price.close or not shares:
+        return None
+    px = quote_to_major(price.close, price.currency)
+    if not px:
+        return None
+    quote = major_unit(normalize_ccy(price.currency) or price.currency or "USD")
+    packet_mcap = px * shares
+    gap_packet = abs(packet_mcap - yahoo_mcap) / abs(yahoo_mcap)
+    yahoo_sh = _as_share_count(
+        inputs.yahoo_info.get("sharesOutstanding") or inputs.yahoo_info.get("Shares Outstanding__num")
+    )
+    yahoo_from_sh = px * yahoo_sh if yahoo_sh else None
+    gap_yahoo = (
+        abs(yahoo_from_sh - yahoo_mcap) / abs(yahoo_mcap) if yahoo_from_sh else None
+    )
+    if gap_packet > _MCAP_SHARE_TOL:
+        return (
+            f"SHARE COUNT: packet market cap {fmt_amount(packet_mcap, quote)} vs "
+            f"Yahoo market cap {fmt_amount(yahoo_mcap, quote)} differ by {gap_packet:.0%} "
+            f"(packet uses {shares / 1e6:,.1f}M shares, {source})."
+        )
+    if gap_yahoo is not None and gap_yahoo > _MCAP_SHARE_TOL:
+        return (
+            f"SHARE COUNT: Yahoo sharesOutstanding {yahoo_sh / 1e6:,.1f}M × price → "
+            f"{fmt_amount(yahoo_from_sh, quote)} vs Yahoo market cap "
+            f"{fmt_amount(yahoo_mcap, quote)} (differ by {gap_yahoo:.0%}). "
+            f"Packet uses {shares / 1e6:,.1f}M ({source}) so share classes are not omitted."
+        )
+    return None
+
+
+def _valuation_figures(inputs, report, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_ebitda,
+                       cash0, total_debt0, equity0, ttm_ceps) -> dict[str, Any]:
+    price = inputs.price
+    shares, share_src = _resolve_share_count(inputs)
     quote = normalize_ccy((price.currency if price else inputs.currency_price) or "USD") or "USD"
     val_ccy = major_unit(quote)
-    out: dict[str, float | None] = {
+    out: dict[str, Any] = {
         "mcap": None, "ev": None, "pe_ttm": None, "ev_ebitda": None, "ev_sales": None,
         "ps": None, "pb": None, "fcf_yield": None, "cash_in_price_ccy": None,
-        "net_cash_per_share": None,
+        "net_cash_per_share": None, "shares": None, "share_source": share_src,
     }
     if price is None or shares in (None, 0):
         return out
     share_n = float(shares)
+    out["shares"] = share_n
     px = quote_to_major(price.close, quote)
     mcap = px * share_n
     out["mcap"] = mcap
@@ -1310,7 +1422,8 @@ def _valuation_figures(inputs, report, ttm_rev, ttm_ni, ttm_nic, ttm_fcf, ttm_eb
 def _valuation_section(inputs, currency, metrics) -> str:
     price = inputs.price
     info = inputs.yahoo_info
-    shares = info.get("sharesOutstanding") or info.get("Shares Outstanding__num")
+    shares = metrics.get("shares")
+    share_src = metrics.get("share_source") or "snapshot"
     close = price.close if price else None
     quote = normalize_ccy((price.currency if price else inputs.currency_price) or "USD") or "USD"
     val_ccy = major_unit(quote)
@@ -1332,7 +1445,8 @@ def _valuation_section(inputs, currency, metrics) -> str:
         )
     if shares and close:
         lines.append(
-            f"| Shares outstanding | {float(shares) / 1e6:,.1f}M | snapshot ⚠ not point-in-time |"
+            f"| Shares outstanding | {float(shares) / 1e6:,.1f}M | "
+            f"{share_src}; snapshot ⚠ not point-in-time |"
         )
     mcap = metrics.get("mcap")
     if mcap is not None:
@@ -1704,6 +1818,7 @@ def _info_to_map(info: dict) -> dict[str, Any]:
         "fiftyDayAverage": "50 Day Average",
         "twoHundredDayAverage": "200 Day Average",
         "sharesOutstanding": "sharesOutstanding",
+        "impliedSharesOutstanding": "impliedSharesOutstanding",
         "marketCap": "Market Cap",
         "priceToBook": "Price to Book",
         "bookValue": "Book Value",
@@ -1716,6 +1831,8 @@ def _info_to_map(info: dict) -> dict[str, Any]:
                 out[f"{label}__num"] = num
     if "sharesOutstanding" in info:
         out["sharesOutstanding"] = info["sharesOutstanding"]
+    if "impliedSharesOutstanding" in info:
+        out["impliedSharesOutstanding"] = info["impliedSharesOutstanding"]
     return out
 
 
@@ -1853,19 +1970,25 @@ def _fetch_fund(ticker: str, info: dict) -> FundSnapshot:
         snap.ytm = _maybe_pct(bond.get("maturity") or bond.get("YTM") or bond.get("yieldToMaturity"))
     holdings = getattr(funds, "top_holdings", None)
     if holdings is not None and hasattr(holdings, "iterrows"):
-        rows = []
-        for idx, row in holdings.head(10).iterrows():
-            weight = None
-            for col in row.index:
-                if "holding" in str(col).lower() or "percent" in str(col).lower() or "weight" in str(col).lower():
-                    weight = _maybe_float(row[col])
-                    break
-            if weight is None and len(row):
-                weight = _maybe_float(row.iloc[0])
-            rows.append((str(idx), weight))
-        snap.top_holdings = rows
+        snap.top_holdings = _holdings_from_frame(holdings)
         snap.holdings_count = snap.holdings_count or len(holdings)
     return snap
+
+
+def _holdings_from_frame(holdings) -> list[tuple[str, float | None]]:
+    """yfinance ``holdingPercent`` is a fraction (0.05 = 5%); store as percent."""
+    rows: list[tuple[str, float | None]] = []
+    for idx, row in holdings.head(10).iterrows():
+        weight = None
+        for col in row.index:
+            name = str(col).lower()
+            if "holding" in name or "percent" in name or "weight" in name:
+                weight = _maybe_pct(row[col])
+                break
+        if weight is None and len(row):
+            weight = _maybe_pct(row.iloc[0])
+        rows.append((str(idx), weight))
+    return rows
 
 
 def _maybe_float(value) -> float | None:

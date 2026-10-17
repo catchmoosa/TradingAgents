@@ -87,6 +87,8 @@ _STATEMENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
         ("Treasury Stock", ("TreasuryStockValue",)),
         ("Minority Interest", ("MinorityInterest",
                                "NoncontrollingInterestInConsolidatedEntity")),
+        # Multi-class filers (NVO A+B, GOOGL A+C, META, BRK) report one fact
+        # per class under the same period; `_as_of_shares` sums them.
         ("Shares Outstanding", ("CommonStockSharesOutstanding",
                                 "EntityCommonStockSharesOutstanding")),
         ("Shares Issued", ("CommonStockSharesIssued",)),
@@ -317,6 +319,92 @@ def _as_of(facts: dict, tags: tuple[str, ...], as_of_date: str, spans: tuple[tup
     return dict(sorted(values.items())), chosen_unit, meta
 
 
+def _share_class_total(vals: list[float]) -> float:
+    """One period's share count: sum distinct classes, not a class plus the total.
+
+    Filers put each class in its own XBRL context, so two facts on the same
+    date are A shares and B shares, not a restatement. If the largest fact
+    already equals the sum of the others it is the total and the rest are
+    the breakdown — keep the total so we do not double-count.
+    """
+    unique: list[float] = []
+    for value in vals:
+        if not any(abs(value - seen) <= max(1.0, 0.001 * abs(seen)) for seen in unique):
+            unique.append(value)
+    if not unique:
+        return 0.0
+    if len(unique) == 1:
+        return unique[0]
+    largest = max(unique)
+    rest = sum(unique) - largest
+    if rest > 0 and abs(largest - rest) / largest <= 0.05:
+        return largest
+    return sum(unique)
+
+
+def _as_of_shares(namespaces: dict, tags: tuple[str, ...], as_of_date: str,
+                  spans: tuple[tuple[int, int], ...],
+                  forms: tuple[str, ...] = ()) -> tuple[dict, str, dict]:
+    """Share count per period, summing classes in the same filing vintage.
+
+    ``dei:EntityCommonStockSharesOutstanding`` (and the us-gaap twin) repeats
+    once per class. Ordinary `_as_of` would keep one class. Facts are taken
+    from both ``dei`` and ``us-gaap``; the latest filing on or before the
+    date wins, then classes in that vintage are summed.
+    """
+    groups: dict[tuple[str, int, str], dict] = {}
+    for ns in ("dei", "us-gaap"):
+        facts = namespaces.get(ns) or {}
+        for tag in tags:
+            for unit, unit_values in ((facts.get(tag) or {}).get("units") or {}).items():
+                if unit and "share" not in str(unit).lower():
+                    continue
+                for fact in unit_values:
+                    index = _span_index(fact, spans)
+                    if fact["filed"] > as_of_date or index is None:
+                        continue
+                    form = str(fact.get("form") or "")
+                    if forms and not form.startswith(forms):
+                        continue
+                    key = (fact["end"], index, fact["filed"])
+                    slot = groups.get(key)
+                    if slot is None:
+                        slot = {
+                            "vals": [],
+                            "unit": unit or "shares",
+                            "fy": fact.get("fy"),
+                            "fp": fact.get("fp"),
+                            "form": form,
+                        }
+                        groups[key] = slot
+                    slot["vals"].append(float(fact["val"]))
+                    if fact.get("fy") is not None:
+                        slot["fy"] = fact.get("fy")
+                    if fact.get("fp"):
+                        slot["fp"] = fact.get("fp")
+                    if form:
+                        slot["form"] = form
+    values: dict[tuple[str, int], float] = {}
+    units: dict[tuple[str, int], str] = {}
+    meta: dict[tuple[str, int], dict] = {}
+    latest_filed: dict[tuple[str, int], str] = {}
+    for (end, index, filed), slot in groups.items():
+        period = (end, index)
+        seen = latest_filed.get(period)
+        if seen is not None and filed < seen:
+            continue
+        if seen == filed and period in values:
+            merged = _share_class_total([values[period], *slot["vals"]])
+            values[period] = merged
+            continue
+        latest_filed[period] = filed
+        values[period] = _share_class_total(slot["vals"])
+        units[period] = slot["unit"]
+        meta[period] = {"fy": slot["fy"], "fp": slot["fp"], "form": slot["form"]}
+    chosen_unit = units[max(units)] if units else "shares"
+    return dict(sorted(values.items())), chosen_unit, meta
+
+
 def _fiscal_year(value) -> int | None:
     try:
         return int(value)
@@ -353,7 +441,7 @@ def _format_value(value, unit: str) -> str:
 
 def _header_unit(lines: dict[str, tuple[dict, str]]) -> str:
     for values, unit in lines.values():
-        if values and unit and "/" not in unit:
+        if values and unit and "/" not in unit and "share" not in unit.lower():
             return unit
     return "USD"
 
@@ -515,12 +603,17 @@ def _span_setup(freq: str):
 
 
 def _collect(kind: str, ticker: str, freq: str, as_of_date: str, title: str):
-    as_of_date, us_gaap, _namespaces = _load_facts(ticker, as_of_date)
+    as_of_date, us_gaap, namespaces = _load_facts(ticker, as_of_date)
     quarterly, spans, names, forms = _span_setup(freq)
     lines: dict[str, tuple[dict, str]] = {}
     metas: dict[str, dict] = {}
     for label, tags in _STATEMENTS[kind]:
-        values, unit, meta = _as_of(us_gaap, tags, as_of_date, spans, forms)
+        if label == "Shares Outstanding":
+            values, unit, meta = _as_of_shares(
+                namespaces, tags, as_of_date, spans, forms,
+            )
+        else:
+            values, unit, meta = _as_of(us_gaap, tags, as_of_date, spans, forms)
         lines[label] = (values, unit)
         metas[label] = meta
     # Each row takes the shortest span it reports for a period, and a column

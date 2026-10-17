@@ -12,11 +12,14 @@ from tradingagents.dataflows.fundamentals_packet import (
     FundSnapshot,
     PacketInputs,
     PricePoint,
+    _holdings_from_frame,
+    _maybe_pct,
     build_packet,
     load_tool_dump,
     merge_extra_rows,
 )
 from tradingagents.dataflows.sec_8k import SubsequentEvent
+from tradingagents.dataflows.statement_tables import PeriodCol, StatementTable
 from tradingagents.dataflows.vendors import sec_edgar
 
 FIXTURES = Path(__file__).parent / "fixtures" / "fundamentals"
@@ -300,3 +303,153 @@ def test_sony_annual_capex_is_positive_spend_in_core():
         line for line in appendix.splitlines() if "Capital Expenditure" in line
     )
     assert "-457.7" in app_line
+
+
+def _nvo_like_inputs(*, statement_shares: float | None, yahoo_shares: float,
+                     yahoo_mcap: float, price: float = 38.73) -> PacketInputs:
+    n = 4
+    cols = [
+        PeriodCol(end="2026-06-30", fy=2026, fp="Q2", span_months=3),
+        PeriodCol(end="2026-03-31", fy=2026, fp="Q1", span_months=3),
+        PeriodCol(end="2025-12-31", fy=2025, fp="Q4", span_months=3),
+        PeriodCol(end="2025-09-30", fy=2025, fp="Q3", span_months=3),
+    ]
+
+    def _tbl(kind, rows, unscaled=None):
+        return StatementTable(
+            kind=kind, freq="quarterly", source="yahoo", currency="DKK",
+            scale=1.0, columns=cols, rows={k: (v if isinstance(v, list) else [v] * n)
+                                           for k, v in rows.items()},
+            unscaled_rows=unscaled or set(),
+        )
+
+    bs_rows: dict = {
+        "Cash and Short-Term Investments": 80_000_000_000,
+        "Total Debt": 10_000_000_000,
+        "Stockholders Equity": 140_000_000_000,
+    }
+    unscaled = set()
+    if statement_shares is not None:
+        bs_rows["Shares Outstanding"] = statement_shares
+        unscaled.add("Shares Outstanding")
+    return PacketInputs(
+        ticker="NVO", as_of="2026-10-17", quote_type="EQUITY",
+        currency_report="DKK", currency_price="USD",
+        price=PricePoint(close=price, day="2026-10-17", currency="USD"),
+        fx_usd=6.45, fx_pair="USD/DKK", fx_day="2026-10-17",
+        fx_source="yfinance USD/DKK",
+        yahoo_info={
+            "sharesOutstanding": yahoo_shares,
+            "Market Cap": yahoo_mcap,
+            "Market Cap__num": yahoo_mcap,
+        },
+        statements={
+            "income_statement:quarterly": _tbl("income_statement", {
+                "Revenue": 70_000_000_000, "Net Income": 20_000_000_000,
+                "Operating Income": 25_000_000_000, "Gross Profit": 50_000_000_000,
+            }),
+            "cashflow:quarterly": _tbl("cashflow", {
+                "Operating Cash Flow": 22_000_000_000, "Capital Expenditure": 0.0,
+            }),
+            "balance_sheet:quarterly": _tbl("balance_sheet", bs_rows, unscaled),
+        },
+    )
+
+
+@pytest.mark.unit
+def test_nvo_like_two_class_share_count_uses_the_total():
+    """B shares 3,338M omit A shares; total ~4,425M matches Yahoo market cap."""
+    a_shares, b_shares = 1_087_000_000, 3_338_000_000
+    total = a_shares + b_shares
+    price = 38.73
+    yahoo_mcap = 171_400_000_000
+    inputs = _nvo_like_inputs(
+        statement_shares=total, yahoo_shares=b_shares, yahoo_mcap=yahoo_mcap, price=price,
+    )
+    packet = build_packet(inputs)
+    assert packet.metrics["shares"] == pytest.approx(total)
+    assert packet.metrics["mcap"] == pytest.approx(price * total)
+    assert packet.metrics["mcap"] == pytest.approx(yahoo_mcap, rel=0.01)
+    val = packet.markdown.split("## 5.", 1)[1].split("## 6.", 1)[0]
+    assert "4,425.0M" in val
+    assert "3,338.0M" not in val
+    flags = packet.markdown.split("## 9.", 1)[1]
+    assert "SHARE COUNT" in flags
+    assert "3,338" in flags
+
+
+@pytest.mark.unit
+def test_share_count_falls_back_to_yahoo_mcap_over_price():
+    b_shares = 3_338_000_000
+    price = 38.73
+    yahoo_mcap = 171_400_000_000
+    inputs = _nvo_like_inputs(
+        statement_shares=None, yahoo_shares=b_shares, yahoo_mcap=yahoo_mcap, price=price,
+    )
+    packet = build_packet(inputs)
+    implied = yahoo_mcap / price
+    assert packet.metrics["shares"] == pytest.approx(implied)
+    assert packet.metrics["mcap"] == pytest.approx(yahoo_mcap)
+    assert "SHARE COUNT" in packet.markdown.split("## 9.", 1)[1]
+
+
+@pytest.mark.unit
+def test_share_count_agrees_with_yahoo_mcap_without_a_flag():
+    shares, price = 1_000_000_000, 100.0
+    inputs = _nvo_like_inputs(
+        statement_shares=shares, yahoo_shares=shares,
+        yahoo_mcap=shares * price, price=price,
+    )
+    packet = build_packet(inputs)
+    assert packet.metrics["shares"] == pytest.approx(shares)
+    assert "SHARE COUNT:" not in packet.markdown
+
+
+@pytest.mark.unit
+def test_mcap_mismatch_over_15_percent_is_flagged_when_unresolved():
+    """Safety net: packet mcap still >15% from Yahoo after share resolution."""
+    from tradingagents.dataflows.fundamentals_packet import _share_count_flag
+
+    inputs = _nvo_like_inputs(
+        statement_shares=None, yahoo_shares=3_338_000_000,
+        yahoo_mcap=171_400_000_000, price=38.73,
+    )
+    # Pretend resolution could not correct (used B shares only).
+    flag = _share_count_flag(inputs, 3_338_000_000, "yahoo sharesOutstanding")
+    assert flag is not None
+    assert "SHARE COUNT" in flag
+    assert "15%" in flag or "24%" in flag or "%" in flag
+
+
+@pytest.mark.unit
+def test_etf_holding_percent_fraction_is_scaled():
+    """yfinance holdingPercent 0.05 means 5%, not 0.05%."""
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {"holdingPercent": [0.0523, 0.041, 5.10]},
+        index=["Tencent Holdings Ltd", "Alibaba Group", "AlreadyPercent"],
+    )
+    rows = _holdings_from_frame(frame)
+    assert rows[0][0] == "Tencent Holdings Ltd"
+    assert rows[0][1] == pytest.approx(5.23)
+    assert rows[1][1] == pytest.approx(4.10)
+    assert rows[2][1] == pytest.approx(5.10)
+    assert _maybe_pct(0.0059) == pytest.approx(0.59)
+    assert _maybe_pct(0.0231) == pytest.approx(2.31)
+    assert _maybe_pct(0.048) == pytest.approx(4.8)
+    packet = build_packet(PacketInputs(
+        ticker="TCHI", as_of="2026-10-17", quote_type="ETF",
+        price=PricePoint(close=20.0, day="2026-10-17"),
+        fund=FundSnapshot(
+            name="iShares MSCI China ETF", quote_type="ETF",
+            expense_ratio=_maybe_pct(0.0059), yield_ttm=_maybe_pct(0.0231),
+            top_holdings=rows,
+        ),
+    ))
+    holdings = packet.markdown.split("## 2. Top holdings", 1)[1].split("## 9.", 1)[0]
+    assert "5.23%" in holdings
+    assert "4.10%" in holdings
+    assert "0.05%" not in holdings
+    assert "0.59%" in packet.markdown
+    assert "2.31%" in packet.markdown
